@@ -1,0 +1,1328 @@
+---
+title: "Discriminación de taxones forestales con series temporales Sentinel-2"
+subtitle: "Prueba de factibilidad sobre datos del Inventario Forestal del Ecuador"
+author: "Andrés Acuña"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.width = 9, fig.height = 5.5, dpi = 130,
+  fig.align = "center"
+)
+options(timeout = 1800, scipen = 999)
+```
+
+```{r estilo, include=FALSE}
+# Paleta categórica validada para 5 clases (separación por deficiencia de color
+# verificada; el aviso de contraste se compensa con etiquetas y tablas).
+PAL_CAT <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+
+# Rampa secuencial de un solo tono, para magnitud y para etapas ordenadas
+AZUL <- c("#86b6ef", "#5598e7", "#2a78d6", "#256abf", "#184f95", "#0d366b")
+
+TINTA    <- "#0b0b0b"
+TINTA_2  <- "#52514e"
+APAGADO  <- "#898781"
+REJILLA  <- "#e1e0d9"
+EJE      <- "#c3c2b7"
+LIENZO   <- "#fcfcfb"
+
+tema_viz <- function(base = 12) {
+  ggplot2::theme_minimal(base_size = base) +
+    ggplot2::theme(
+      plot.background   = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.background  = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.grid.major  = ggplot2::element_line(colour = REJILLA, linewidth = 0.3),
+      panel.grid.minor  = ggplot2::element_blank(),
+      axis.line         = ggplot2::element_line(colour = EJE, linewidth = 0.4),
+      axis.ticks        = ggplot2::element_blank(),
+      axis.text         = ggplot2::element_text(colour = APAGADO, size = base - 2),
+      axis.title        = ggplot2::element_text(colour = TINTA_2, size = base - 1),
+      plot.title        = ggplot2::element_text(colour = TINTA, face = "bold",
+                                                size = base + 2, margin = ggplot2::margin(b = 4)),
+      plot.subtitle     = ggplot2::element_text(colour = TINTA_2, size = base - 1,
+                                                margin = ggplot2::margin(b = 10)),
+      plot.caption      = ggplot2::element_text(colour = APAGADO, size = base - 3, hjust = 0),
+      legend.text       = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.title      = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.key.size   = grid::unit(0.45, "cm"),
+      strip.text        = ggplot2::element_text(colour = TINTA, face = "bold", size = base - 2),
+      plot.title.position = "plot"
+    )
+}
+
+# Convención decimal en español: coma
+pct <- function(x, d = 1) paste0(sub("\\.", ",", sprintf(paste0("%.", d, "f"), 100 * x)), "%")
+mil <- function(x) format(x, big.mark = ".", decimal.mark = ",", trim = TRUE)
+dec <- function(x, d = 3) sub("\\.", ",", sprintf(paste0("%.", d, "f"), x))
+```
+
+# Objetivo
+
+Determinar si es viable separar taxones forestales en Ecuador usando únicamente
+imágenes satelitales de acceso abierto, sin trabajo de campo propio.
+
+La cadena completa se ejecuta en esta sesión:
+
+1. Descarga de registros georreferenciados del inventario forestal nacional (GBIF / MAATE).
+2. Búsqueda y selección de escenas Sentinel-2 L2A vía STAC.
+3. Extracción de reflectancia en cada punto, con enmascaramiento de nubes.
+4. Medición del soporte taxonómico disponible y elección del nivel de clasificación.
+5. Entrenamiento y validación de un clasificador Random Forest.
+
+No se descargan escenas completas: GDAL lee por rangos HTTP directamente sobre los
+COG remotos y trae solo los bloques que cubren los puntos.
+
+El paso 4 es el que decide el resultado. El inventario registra un bosque tropical
+de diversidad muy alta, con una cola larguísima de taxones raros: la mayoría aparece
+una o dos veces en todo el país. Por eso el nivel de clasificación no se fija de
+antemano, se mide.
+
+---
+
+# Preparación del entorno
+
+```{r paquetes}
+paquetes <- c("jsonlite", "rstac", "terra", "sf", "dplyr", "tidyr",
+              "ggplot2", "scales", "ranger", "knitr")
+
+faltantes <- paquetes[!paquetes %in% rownames(installed.packages())]
+if (length(faltantes) > 0) install.packages(faltantes, quiet = TRUE)
+
+invisible(lapply(paquetes, library, character.only = TRUE))
+
+# Lectura eficiente de COG remotos
+terra::setGDALconfig("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+terra::setGDALconfig("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+terra::setGDALconfig("GDAL_HTTP_MULTIPLEX", "YES")
+terra::setGDALconfig("VSI_CACHE", "TRUE")
+terra::setGDALconfig("GDAL_HTTP_MAX_RETRY", "5")
+terra::setGDALconfig("GDAL_HTTP_RETRY_DELAY", "2")
+
+set.seed(2026)
+```
+
+```{r parametros}
+# ---- Parámetros de la corrida -------------------------------------------------
+DATASET_GBIF   <- "442e07a0-4b6c-499f-a68d-706ed112c1ac"  # 2da Evaluación Nacional Forestal
+STAC_URL       <- "https://earth-search.aws.element84.com/v1"
+# Alternativa: "sentinel-2-c1-l2a" (Colección 1, reprocesada). Todos sus activos
+# son COG por HTTPS, sin los ítems heredados que hay que descartar en "sentinel-2-l2a".
+# Si quedan pocas escenas utilizables por celda, conviene probar con esa.
+COLECCION      <- "sentinel-2-l2a"
+
+# Earth Search exige RFC3339 completo: fecha, hora y zona
+FECHA_INI      <- "2022-01-01"
+FECHA_FIN      <- "2024-12-31"
+VENTANA        <- paste0(FECHA_INI, "T00:00:00Z/", FECHA_FIN, "T23:59:59Z")
+
+NUBE_MAX       <- 35   # % de nubosidad tolerado por escena
+N_ESCENAS      <- 6    # ventanas temporales por celda; una escena por ventana
+N_CELDAS       <- 6    # celdas MGRS a procesar, de mayor a menor densidad
+
+MIN_POR_CLASE  <- 20   # mínimo de registros para que un taxón entre como clase
+MAX_CLASES     <- 8    # se conservan los taxones más frecuentes hasta este tope
+PROP_TRAIN     <- 0.70
+N_ARBOLES      <- 800
+
+BANDAS <- c("blue", "green", "red", "nir", "swir16", "swir22")
+
+# ---- Caché en disco -----------------------------------------------------------
+CACHE_DIR <- "cache_madera"
+FORZAR    <- FALSE   # TRUE vuelve a descargar todo ignorando lo guardado
+```
+
+Todo lo que viaja por red se guarda en `cache_madera/`. Al volver a tejer, cada
+etapa lee del disco en vez de repetir la descarga. La extracción se guarda **por
+celda y por escena**, de modo que una interrupción a mitad de camino no obliga a
+empezar de cero: al reanudar solo se piden las que falten.
+
+```{r cache-helper}
+dir.create(CACHE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+en_cache <- function(nombre, expr, forzar = FORZAR, columnas = NULL) {
+  ruta <- file.path(CACHE_DIR, paste0(nombre, ".rds"))
+
+  if (!forzar && file.exists(ruta)) {
+    guardado <- readRDS(ruta)
+    # Una caché de una corrida con otras bandas tiene otras columnas: se descarta
+    vigente <- is.null(columnas) || all(columnas %in% names(guardado))
+    if (vigente) {
+      message("[cache] se reutiliza ", nombre)
+      return(guardado)
+    }
+    message("[cache] obsoleta, se rehace ", nombre)
+  }
+
+  message("[red]   se descarga ", nombre)
+  valor <- expr              # se evalúa solo si no había caché vigente
+  saveRDS(valor, ruta)
+  valor
+}
+
+limpiar_cache <- function() unlink(file.path(CACHE_DIR, "*.rds"))
+```
+
+---
+
+# Datos de referencia: inventario forestal
+
+Se consulta la API de GBIF (sin autenticación) y se pagina el conjunto completo.
+
+```{r descarga-gbif}
+descargar_gbif <- function(dataset_key, por_pagina = 300) {
+  base <- paste0("https://api.gbif.org/v1/occurrence/search",
+                 "?datasetKey=", dataset_key,
+                 "&hasCoordinate=true&hasGeospatialIssue=false",
+                 "&limit=", por_pagina, "&offset=")
+
+  acumulado <- list()
+  offset <- 0
+  repeat {
+    resp <- jsonlite::fromJSON(paste0(base, offset), flatten = TRUE)
+    if (length(resp$results) == 0 || nrow(resp$results) == 0) break
+
+    acumulado[[length(acumulado) + 1]] <- resp$results
+    offset <- offset + por_pagina
+    if (isTRUE(resp$endOfRecords) || offset >= resp$count) break
+  }
+
+  cols <- c("key", "scientificName", "family", "genus", "species",
+            "decimalLatitude", "decimalLongitude", "eventDate",
+            "stateProvince", "coordinateUncertaintyInMeters")
+
+  normalizar <- function(df) {
+    for (cc in cols) if (!cc %in% names(df)) df[[cc]] <- NA
+    df[, cols, drop = FALSE]
+  }
+
+  do.call(rbind, lapply(acumulado, normalizar))
+}
+
+ocurrencias <- en_cache(
+  paste0("gbif_", substr(DATASET_GBIF, 1, 8)),
+  descargar_gbif(DATASET_GBIF)
+)
+
+n_esp <- dplyr::n_distinct(ocurrencias$species, na.rm = TRUE)
+n_gen <- dplyr::n_distinct(ocurrencias$genus,   na.rm = TRUE)
+n_fam <- dplyr::n_distinct(ocurrencias$family,  na.rm = TRUE)
+
+knitr::kable(
+  data.frame(
+    Concepto = c("Registros georreferenciados", "Especies distintas",
+                 "Géneros distintos", "Familias distintas"),
+    Cantidad = mil(c(nrow(ocurrencias), n_esp, n_gen, n_fam))
+  ),
+  caption = "Segunda Evaluación Nacional Forestal del Ecuador Continental (MAATE)",
+  align = c("l", "r")
+)
+```
+
+La primera señal de alarma está en esa tabla: `r mil(nrow(ocurrencias))` registros
+reparten entre `r mil(n_esp)` especies. Son menos de tres registros por especie en
+promedio, sobre todo el territorio nacional.
+
+## Cuán concentrado está el dato
+
+Antes de gastar ancho de banda conviene saber si existe alguna clase con suficientes
+registros. Esto se mide sobre el país entero, que es el mejor caso posible.
+
+```{r soporte-nacional}
+soporte <- function(datos, nivel) {
+  tt <- table(datos[[nivel]])
+  tt <- tt[!is.na(names(tt)) & names(tt) != ""]
+  data.frame(
+    nivel        = nivel,
+    taxones      = length(tt),
+    max_registros = if (length(tt)) max(tt) else 0,
+    clases_utiles = sum(tt >= MIN_POR_CLASE),
+    registros_utiles = sum(tt[tt >= MIN_POR_CLASE]),
+    stringsAsFactors = FALSE
+  )
+}
+
+tabla_soporte <- do.call(rbind, lapply(c("species", "genus", "family"),
+                                       function(n) soporte(ocurrencias, n)))
+
+knitr::kable(
+  tabla_soporte,
+  col.names = c("Nivel", "Taxones", "Máx. registros en un taxón",
+                paste0("Clases con ", MIN_POR_CLASE, "+"), "Registros utilizables"),
+  caption = "Soporte taxonómico a escala nacional (techo teórico del ejercicio)"
+)
+```
+
+```{r elegir-nivel}
+# Se toma el nivel más fino que ofrezca al menos dos clases con soporte suficiente
+viables <- tabla_soporte[tabla_soporte$clases_utiles >= 2, ]
+NIVEL <- if (nrow(viables) > 0) viables$nivel[1] else "family"
+
+HAY_SENAL <- nrow(viables) > 0
+```
+
+```{r nota-nivel, results='asis'}
+if (HAY_SENAL) {
+  cat("Se trabaja al nivel de **", NIVEL, "**: es el más fino que ofrece al menos dos ",
+      "clases con ", MIN_POR_CLASE, " registros o más.\n", sep = "")
+} else {
+  cat("Ningún nivel taxonómico alcanza dos clases con ", MIN_POR_CLASE,
+      " registros. Se continúa al nivel de familia para cuantificar hasta dónde ",
+      "llega el dato.\n", sep = "")
+}
+```
+
+```{r frecuencias-nivel}
+frec_nacional <- ocurrencias |>
+  dplyr::filter(!is.na(.data[[NIVEL]]), .data[[NIVEL]] != "") |>
+  dplyr::count(.data[[NIVEL]], name = "registros", sort = TRUE)
+names(frec_nacional)[1] <- "taxon"
+
+knitr::kable(head(frec_nacional, 15),
+             col.names = c(paste0("Taxón (", NIVEL, ")"), "Registros"),
+             caption = "Taxones más frecuentes en el inventario")
+```
+
+La tabla anterior muestra la cabeza de la distribución. Lo decisivo es la cola.
+
+```{r rango-abundancia, fig.height=5}
+ra <- frec_nacional |>
+  dplyr::arrange(dplyr::desc(registros)) |>
+  dplyr::mutate(rango = dplyr::row_number())
+
+n_umbral <- sum(ra$registros >= MIN_POR_CLASE)
+n_unicos <- sum(ra$registros == 1)
+
+ggplot(ra, aes(x = rango, y = registros)) +
+  geom_area(fill = AZUL[1], alpha = 0.35) +
+  geom_line(colour = AZUL[3], linewidth = 0.7) +
+  geom_hline(yintercept = MIN_POR_CLASE, colour = "#d03b3b",
+             linetype = "22", linewidth = 0.5) +
+  annotate("text", x = nrow(ra) * 0.55, y = MIN_POR_CLASE * 1.55,
+           label = paste0("Umbral de ", MIN_POR_CLASE, " registros"),
+           colour = "#d03b3b", size = 3.4, hjust = 0) +
+  annotate("text", x = n_umbral + nrow(ra) * 0.02, y = max(ra$registros) * 0.62,
+           label = paste0(n_umbral, " taxones lo superan"),
+           colour = TINTA_2, size = 3.4, hjust = 0) +
+  scale_y_log10(breaks = c(1, 3, 10, 30, 100, 300)) +
+  labs(
+    title = paste0("La abundancia cae a plomo: ", nrow(ra), " taxones, ",
+                   n_unicos, " con un solo registro"),
+    subtitle = paste0("Registros por taxón al nivel de ", NIVEL,
+                      ", ordenados de mayor a menor (escala logarítmica)"),
+    x = "Taxón, por rango de abundancia",
+    y = "Registros"
+  ) +
+  tema_viz()
+```
+
+Así se ve un inventario de bosque tropical: unos pocos taxones frecuentes y una cola
+enorme de rarezas. De los `r nrow(ra)` taxones al nivel de `r NIVEL`,
+**`r n_unicos` aparecen una sola vez** en todo el país, y apenas `r n_umbral`
+alcanzan los `r MIN_POR_CLASE` registros que un clasificador necesita por clase.
+
+Este gráfico anticipa el resultado del ejercicio. Todo lo que sigue es la
+verificación empírica de lo que esta curva ya insinúa.
+
+## Localización de las parcelas
+
+Los registros se agrupan en conglomerados. Se redondean las coordenadas para
+contar sitios de muestreo efectivos, que es la unidad espacial real del inventario.
+
+```{r sitios}
+ocurrencias <- ocurrencias |>
+  dplyr::filter(!is.na(decimalLatitude), !is.na(decimalLongitude)) |>
+  dplyr::mutate(
+    sitio = paste(round(decimalLatitude, 3), round(decimalLongitude, 3), sep = "_")
+  )
+
+n_sitios  <- dplyr::n_distinct(ocurrencias$sitio)
+med_sitio <- median(table(ocurrencias$sitio))
+```
+
+Los `r mil(nrow(ocurrencias))` árboles no están dispersos al azar: se agrupan en
+**`r n_sitios` sitios de muestreo**, con una mediana de `r med_sitio` árboles por
+sitio. Esa estructura es importante y se respeta más adelante al validar el modelo,
+porque árboles del mismo conglomerado comparten píxel.
+
+```{r mapa-puntos}
+puntos_sf <- sf::st_as_sf(ocurrencias,
+                          coords = c("decimalLongitude", "decimalLatitude"),
+                          crs = 4326, remove = FALSE)
+
+ggplot(puntos_sf) +
+  geom_sf(aes(color = stateProvince), size = 1.1, alpha = 0.75) +
+  labs(title = "Registros del inventario forestal nacional",
+       subtitle = paste(nrow(puntos_sf), "árboles georreferenciados"),
+       color = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "right",
+        legend.key.size = unit(0.4, "cm"),
+        legend.text = element_text(size = 7))
+```
+
+---
+
+# Escenas Sentinel-2
+
+La búsqueda se hace en dos etapas, y el orden importa. La envolvente de los puntos
+cubre el país entero: sobre ese rectángulo, tres años de Sentinel-2 son más de
+veinte mil escenas, y paginarlas todas hace que el servidor corte la conexión.
+
+Primero se hace un **reconocimiento barato** con una ventana corta, solo para saber
+qué celdas MGRS cubren los registros y cuáles concentran más. Recién entonces se
+consulta el periodo completo, celda por celda y con el filtro de nubosidad aplicado
+del lado del servidor. Así cada consulta devuelve decenas de escenas, no decenas de
+miles.
+
+A diferencia de un enfoque sobre una sola celda, aquí se procesan varias. Con un
+inventario tan disperso, restringirse a una deja sin registros suficientes a
+cualquier taxón.
+
+```{r stac-utilidades}
+# Extrae identificador de celda MGRS de forma tolerante al esquema del catálogo
+celda_mgrs <- function(props) {
+  if (!is.null(props[["grid:code"]])) return(sub("^MGRS-", "", props[["grid:code"]]))
+  if (!is.null(props[["s2:mgrs_tile"]])) return(props[["s2:mgrs_tile"]])
+  if (!is.null(props[["mgrs:utm_zone"]])) {
+    return(paste0(sprintf("%02d", props[["mgrs:utm_zone"]]),
+                  props[["mgrs:latitude_band"]],
+                  props[["mgrs:grid_square"]]))
+  }
+  NA_character_
+}
+
+# Los 5xx de Earth Search suelen ser transitorios: se reintenta con espera creciente
+con_reintento <- function(expr, intentos = 4, espera = 3) {
+  # Se captura la llamada sin evaluar: una promesa se evaluaría una sola vez
+  # y el bucle repetiría el mismo resultado en lugar de reintentar de verdad.
+  llamada <- substitute(expr)
+  entorno <- parent.frame()
+
+  for (k in seq_len(intentos)) {
+    r <- try(eval(llamada, entorno), silent = TRUE)
+    if (!inherits(r, "try-error")) return(r)
+    if (k == intentos) stop("La consulta STAC falló tras ", intentos,
+                            " intentos:\n", as.character(r))
+    message("  reintento ", k, " de ", intentos - 1, " en ", espera * k, "s")
+    Sys.sleep(espera * k)
+  }
+}
+
+# La colección sentinel-2-l2a mezcla ítems de distintas épocas. Los modernos
+# exponen COG por HTTPS (https://sentinel-cogs.s3.../B02.tif); algunos antiguos
+# apuntan a JP2 en un bucket S3 de pago por solicitante
+# (s3://sentinel-s2-l2a/tiles/.../R10m/B02.jp2), que GDAL no lee por /vsicurl/.
+href_de <- function(feature, activo) {
+  a <- feature$assets[[activo]]
+  if (is.null(a)) return(NA_character_)
+
+  h <- a$href
+  if (is.character(h) && length(h) == 1 && grepl("^https?://", h)) return(h)
+
+  # Extensión alternate-assets: a veces la variante HTTPS viene aparte
+  alt <- a[["alternate"]]
+  if (is.list(alt)) {
+    for (nm in names(alt)) {
+      hh <- alt[[nm]]$href
+      if (is.character(hh) && length(hh) == 1 && grepl("^https?://", hh)) return(hh)
+    }
+  }
+
+  NA_character_
+}
+
+# Una escena sirve solo si todas sus bandas y la SCL son legibles por HTTPS
+escena_utilizable <- function(feature) {
+  all(vapply(c(BANDAS, "scl"),
+             function(b) !is.na(href_de(feature, b)),
+             logical(1)))
+}
+
+tabla_meta <- function(features) {
+  m <- do.call(rbind, lapply(features, function(f) {
+    data.frame(
+      id     = f$id,
+      fecha  = as.Date(substr(f$properties$datetime, 1, 10)),
+      nubes  = as.numeric(f$properties[["eo:cloud_cover"]]),
+      celda  = celda_mgrs(f$properties),
+      epsg   = as.integer(f$properties[["proj:epsg"]]),
+      offset_aplicado = isTRUE(f$properties[["earthsearch:boa_offset_applied"]]),
+      stringsAsFactors = FALSE
+    )
+  }))
+  m[!is.na(m$celda), ]
+}
+```
+
+## Etapa 1: reconocimiento de celdas
+
+```{r stac-recon}
+bb <- as.numeric(sf::st_bbox(puntos_sf))
+
+# Sentinel-2 revisita cada 5 días: 20 días bastan para ver todas las celdas una vez
+RECON_FIN <- as.character(as.Date(FECHA_INI) + 20)
+
+reconocer <- function() {
+  con_reintento(
+    rstac::stac(STAC_URL) |>
+      rstac::stac_search(
+        collections = COLECCION,
+        bbox        = bb,
+        datetime    = paste0(FECHA_INI, "T00:00:00Z/", RECON_FIN, "T23:59:59Z"),
+        limit       = 400
+      ) |>
+      rstac::post_request()
+  )
+}
+
+recon <- en_cache(paste0("recon_", paste(round(bb, 2), collapse = "_")), reconocer())
+n_recon <- rstac::items_length(recon)
+```
+
+El reconocimiento devolvió `r n_recon` escenas en una ventana de 20 días, suficiente
+para mapear la malla completa sobre el área de interés.
+
+```{r huellas}
+huellas <- lapply(recon$features, function(f) {
+  bx <- f$bbox
+  sf::st_as_sfc(sf::st_bbox(c(xmin = bx[1], ymin = bx[2],
+                              xmax = bx[3], ymax = bx[4]), crs = 4326))
+})
+huellas_sf <- sf::st_sf(
+  celda    = sapply(recon$features, function(f) celda_mgrs(f$properties)),
+  geometry = do.call(c, huellas)
+)
+huellas_sf <- huellas_sf[!is.na(huellas_sf$celda), ]
+huellas_sf <- huellas_sf[!duplicated(huellas_sf$celda), ]
+
+interseccion <- sf::st_join(puntos_sf, huellas_sf, join = sf::st_within)
+
+# Las celdas MGRS se solapan: un punto puede caer en varias. Se le asigna una sola,
+# la de mayor densidad, para que ningún árbol entre dos veces al conjunto.
+prioridad <- interseccion |>
+  sf::st_drop_geometry() |>
+  dplyr::filter(!is.na(celda)) |>
+  dplyr::count(celda, sort = TRUE) |>
+  dplyr::mutate(rango = dplyr::row_number()) |>
+  dplyr::select(celda, rango)
+
+interseccion <- interseccion |>
+  dplyr::filter(!is.na(celda)) |>
+  dplyr::left_join(prioridad, by = "celda") |>
+  dplyr::group_by(key) |>
+  dplyr::slice_min(rango, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+conteo_celda <- interseccion |>
+  sf::st_drop_geometry() |>
+  dplyr::count(celda, sort = TRUE)
+
+if (nrow(conteo_celda) == 0) {
+  stop("Ningún registro cayó dentro de una huella de escena. ",
+       "Revisar que el reconocimiento haya devuelto resultados.")
+}
+
+CELDAS <- head(conteo_celda$celda, N_CELDAS)
+
+knitr::kable(head(conteo_celda, N_CELDAS + 4),
+             col.names = c("Celda MGRS", "Registros"),
+             caption = paste("Celdas por densidad de registros; se procesan las",
+                             length(CELDAS), "primeras"))
+
+cubiertos <- sum(conteo_celda$n[conteo_celda$celda %in% CELDAS])
+```
+
+Las `r length(CELDAS)` celdas seleccionadas concentran **`r mil(cubiertos)` de los
+`r mil(sum(conteo_celda$n))` registros** georreferenciados, es decir
+`r pct(cubiertos / sum(conteo_celda$n), 0)` del inventario con una fracción pequeña
+de las descargas.
+
+```{r mapa-celdas, fig.height=7}
+huellas_dib <- huellas_sf |>
+  dplyr::mutate(estado = ifelse(celda %in% CELDAS, "Procesada", "Disponible"))
+
+centros <- sf::st_centroid(huellas_dib[huellas_dib$celda %in% CELDAS, ])
+
+ggplot() +
+  geom_sf(data = huellas_dib, aes(fill = estado), colour = EJE,
+          linewidth = 0.2, alpha = 0.55) +
+  geom_sf(data = puntos_sf, colour = TINTA_2, size = 0.55, alpha = 0.6) +
+  geom_sf_text(data = centros, aes(label = celda), size = 3,
+               colour = TINTA, fontface = "bold") +
+  scale_fill_manual(values = c(Procesada = AZUL[2], Disponible = "#f0efec"),
+                    name = NULL) +
+  labs(
+    title = "Malla Sentinel-2 sobre los registros del inventario",
+    subtitle = paste0("Cada rectángulo es una celda MGRS de ~110 km de lado. Se rotularon las ",
+                      length(CELDAS), " procesadas."),
+    caption = "Puntos: árboles georreferenciados del inventario forestal nacional.",
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "top",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+Las celdas MGRS se solapan entre sí, de modo que un mismo árbol puede caer en más
+de una. Cada registro se asignó a una sola —la de mayor densidad— para que ningún
+árbol entre dos veces al conjunto de entrenamiento.
+
+## Etapa 2: escenas de cada celda
+
+Pedir tres años de una vez obliga a `items_fetch()` a encadenar peticiones, y la
+envolvente de una celda MGRS se solapa con las vecinas, así que el resultado es
+mucho mayor de lo necesario. Como de cada celda solo hacen falta unas pocas escenas
+repartidas en el tiempo, se piden directamente así: el periodo se divide en
+ventanas y de cada una se trae un solo lote pequeño, del que se conserva la escena
+menos nubosa. Ninguna consulta pagina.
+
+```{r stac-celdas}
+# Una consulta acotada: un lote chico, sin items_fetch
+buscar_ventana <- function(bb_c, ini, fin, con_filtro = TRUE) {
+  q <- rstac::stac(STAC_URL) |>
+    rstac::stac_search(
+      collections = COLECCION,
+      bbox        = bb_c,
+      datetime    = paste0(ini, "T00:00:00Z/", fin, "T23:59:59Z"),
+      limit       = 50
+    )
+  if (con_filtro) q <- rstac::ext_query(q, `eo:cloud_cover` < NUBE_MAX)
+  rstac::post_request(q)
+}
+
+# Si el filtro de nubosidad del servidor da problemas, se repite sin él
+# y se filtra en local: es más tráfico, pero no deja la corrida trabada.
+consultar <- function(bb_c, ini, fin) {
+  r <- try(con_reintento(buscar_ventana(bb_c, ini, fin, TRUE), intentos = 3, espera = 4),
+           silent = TRUE)
+  if (inherits(r, "try-error")) {
+    message("  filtro de nubes en servidor rechazado; se repite sin él")
+    r <- con_reintento(buscar_ventana(bb_c, ini, fin, FALSE), intentos = 3, espera = 4)
+  }
+  Sys.sleep(1)   # no atropellar el servicio
+  r
+}
+
+escenas_de_celda <- function(cc) {
+  bb_c   <- as.numeric(sf::st_bbox(huellas_sf[huellas_sf$celda == cc, ]))
+  cortes <- seq(as.Date(FECHA_INI), as.Date(FECHA_FIN), length.out = N_ESCENAS + 1)
+
+  piezas <- lapply(seq_len(N_ESCENAS), function(k) {
+    ini <- as.character(cortes[k])
+    fin <- as.character(cortes[k + 1] - 1)
+
+    res <- en_cache(paste0("stac_", cc, "_v", k, "_", gsub("-", "", ini)),
+                    consultar(bb_c, ini, fin))
+
+    if (rstac::items_length(res) == 0) return(NULL)
+
+    ids <- sapply(res$features, `[[`, "id")
+
+    m <- tabla_meta(res$features)
+    m <- m[m$celda == cc & m$nubes <= NUBE_MAX, ]
+    if (nrow(m) == 0) return(NULL)
+
+    # Se descartan los ítems sin COG legible antes de elegir, para no gastar
+    # la ventana en una escena que fallaría al momento de extraer
+    sirve <- vapply(m$id,
+                    function(idx) escena_utilizable(res$features[[ match(idx, ids) ]]),
+                    logical(1))
+
+    descartadas <- sum(!sirve)
+    if (descartadas > 0) {
+      message("  ventana ", k, ": ", descartadas, " de ", nrow(m),
+              " escenas sin COG https, descartadas")
+    }
+
+    m <- m[sirve, , drop = FALSE]
+    if (nrow(m) == 0) return(NULL)
+
+    mejor <- m[which.min(m$nubes), ]
+    list(meta = mejor, feature = res$features[[ match(mejor$id, ids) ]])
+  })
+
+  piezas <- piezas[!vapply(piezas, is.null, logical(1))]
+  if (length(piezas) == 0) return(NULL)
+
+  orden <- order(sapply(piezas, function(p) p$meta$fecha))
+  piezas <- piezas[orden]
+
+  list(escenas  = do.call(rbind, lapply(piezas, `[[`, "meta")),
+       features = lapply(piezas, `[[`, "feature"))
+}
+
+catalogo_celdas <- setNames(lapply(CELDAS, function(cc) {
+  message("Consultando celda ", cc)
+  escenas_de_celda(cc)
+}), CELDAS)
+
+catalogo_celdas <- catalogo_celdas[!vapply(catalogo_celdas, is.null, logical(1))]
+
+if (length(catalogo_celdas) == 0) {
+  stop("Ninguna celda devolvió escenas utilizables. Subir NUBE_MAX o ampliar la ventana.")
+}
+
+resumen_escenas <- do.call(rbind, lapply(names(catalogo_celdas), function(cc) {
+  e <- catalogo_celdas[[cc]]$escenas
+  data.frame(celda = cc, escenas = nrow(e),
+             nubes_mediana = round(median(e$nubes), 1),
+             desde = min(e$fecha), hasta = max(e$fecha))
+}))
+
+knitr::kable(resumen_escenas,
+             col.names = c("Celda", "Escenas", "% nubes (mediana)", "Desde", "Hasta"),
+             caption = "Escenas seleccionadas por celda")
+```
+
+```{r mapa-escenas, fig.height=4.6}
+detalle_escenas <- do.call(rbind, lapply(names(catalogo_celdas), function(cc) {
+  e <- catalogo_celdas[[cc]]$escenas
+  data.frame(celda = cc, fecha = e$fecha, nubes = e$nubes)
+}))
+
+ggplot(detalle_escenas, aes(x = fecha, y = celda)) +
+  geom_segment(aes(xend = fecha, y = celda, yend = celda),
+               colour = REJILLA, linewidth = 6) +
+  geom_point(aes(fill = nubes), shape = 21, size = 5,
+             colour = LIENZO, stroke = 1.2) +
+  scale_fill_gradientn(colours = c(AZUL[1], AZUL[3], AZUL[6]),
+                       limits = c(0, NUBE_MAX), name = "% nubes") +
+  labs(
+    title = "Cobertura temporal efectiva por celda",
+    subtitle = paste0("Una escena por ventana de ~6 meses, la menos nubosa disponible bajo ",
+                      NUBE_MAX, "% de nubosidad"),
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "right")
+```
+
+Cada punto es una fecha de adquisición utilizable. Los huecos importan: donde una
+celda no tiene escena en una ventana, los árboles de esa zona pierden un punto de
+su serie temporal, y con menos de tres fechas quedan fuera del análisis.
+
+---
+
+# Extracción de reflectancia
+
+Cada banda se abre como COG remoto y se extraen los valores en las coordenadas de
+los registros. La banda SCL entrega la clasificación de escena, que se usa para
+descartar nube, sombra y cirros. Cada celda tiene su propia proyección UTM, así que
+los puntos se reproyectan por separado en cada una.
+
+```{r extraccion}
+extraer_escena <- function(feature, fila_meta, pts_proj, vect_pts) {
+  valores <- list()
+
+  for (bd in BANDAS) {
+    h <- href_de(feature, bd)
+    if (is.na(h)) { valores[[bd]] <- rep(NA_real_, nrow(pts_proj)); next }
+    r <- terra::rast(paste0("/vsicurl/", h))
+    valores[[bd]] <- as.numeric(terra::extract(r, vect_pts, ID = FALSE)[[1]])
+  }
+
+  h_scl <- href_de(feature, "scl")
+  valores[["scl"]] <- if (!is.na(h_scl)) {
+    as.numeric(terra::extract(terra::rast(paste0("/vsicurl/", h_scl)),
+                              vect_pts, ID = FALSE)[[1]])
+  } else rep(NA_real_, nrow(pts_proj))
+
+  df <- as.data.frame(valores)
+  df$sitio <- pts_proj$sitio
+  df$key   <- pts_proj$key
+  df$celda <- fila_meta$celda
+  df$fecha <- fila_meta$fecha
+
+  # Reflectancia: escala 1/10000, con corrección de offset para la línea base >= 04.00
+  desplazamiento <- if (isTRUE(fila_meta$offset_aplicado)) 0 else -1000
+  if (fila_meta$fecha >= as.Date("2022-01-25") && !isTRUE(fila_meta$offset_aplicado)) {
+    for (bd in BANDAS) df[[bd]] <- (df[[bd]] + desplazamiento) / 10000
+  } else {
+    for (bd in BANDAS) df[[bd]] <- df[[bd]] / 10000
+  }
+
+  df
+}
+
+procesar_celda <- function(cc) {
+  info    <- catalogo_celdas[[cc]]
+  escenas <- info$escenas
+
+  pts_c <- interseccion |> dplyr::filter(celda == cc)
+  if (nrow(pts_c) == 0) return(NULL)
+
+  pts_proj <- sf::st_transform(pts_c, escenas$epsg[1])
+  vect_pts <- terra::vect(pts_proj)
+
+  sello <- paste0(cc, "_", nrow(pts_proj), "pts")
+
+  do.call(rbind, lapply(seq_len(nrow(escenas)), function(i) {
+    en_cache(paste0("refl_", sello, "_", escenas$id[i]),
+             extraer_escena(info$features[[i]], escenas[i, ], pts_proj, vect_pts),
+             columnas = c(BANDAS, "scl", "sitio", "key", "celda", "fecha"))
+  }))
+}
+
+reflectancia <- do.call(rbind, lapply(names(catalogo_celdas), function(cc) {
+  message("Celda ", cc, " - ", nrow(catalogo_celdas[[cc]]$escenas), " escenas")
+  procesar_celda(cc)
+}))
+```
+
+Se extrajeron **`r mil(nrow(reflectancia))` observaciones** —cada una es un árbol
+medido en una fecha— sobre `r length(catalogo_celdas)` celdas, sin descargar ninguna
+escena completa.
+
+```{r mascara-nubes}
+# SCL: 3 sombra de nube, 8 nube prob. media, 9 nube prob. alta, 10 cirros, 11 nieve
+SCL_MALOS <- c(0, 1, 3, 8, 9, 10, 11)
+
+limpio <- reflectancia |>
+  dplyr::filter(!scl %in% SCL_MALOS, !is.na(scl)) |>
+  dplyr::filter(dplyr::if_all(dplyr::all_of(BANDAS), ~ !is.na(.x) & .x > 0 & .x < 1.2))
+
+tasa_limpia <- nrow(limpio) / max(nrow(reflectancia), 1)
+```
+
+Tras descartar nube, sombra de nube, cirros y valores imposibles quedan
+**`r mil(nrow(limpio))` observaciones válidas**, el `r pct(tasa_limpia)` del total.
+Perder casi la mitad del dato por nubosidad es lo normal en el trópico húmedo, y es
+la razón de fondo por la que el óptico rinde poco en Ecuador continental.
+
+---
+
+# Variables espectro-temporales
+
+```{r indices}
+limpio <- limpio |>
+  dplyr::mutate(
+    ndvi  = (nir - red)    / (nir + red),
+    ndwi  = (green - nir)  / (green + nir),
+    nbr   = (nir - swir22) / (nir + swir22),
+    ndmi  = (nir - swir16) / (nir + swir16),
+    rsi   = swir16 / swir22
+  )
+
+VARIABLES <- c(BANDAS, "ndvi", "ndwi", "nbr", "ndmi", "rsi")
+```
+
+La firma de un rodal no es un valor puntual sino su comportamiento en el tiempo.
+Para cada registro se resume la serie con tendencia central, dispersión y amplitud.
+
+```{r agregacion-temporal}
+rasgos <- limpio |>
+  dplyr::group_by(key, sitio, celda) |>
+  dplyr::summarise(
+    n_obs = dplyr::n(),
+    dplyr::across(dplyr::all_of(VARIABLES),
+                  list(med = ~ median(.x, na.rm = TRUE),
+                       sd  = ~ stats::sd(.x, na.rm = TRUE),
+                       amp = ~ diff(range(.x, na.rm = TRUE))),
+                  .names = "{.col}_{.fn}"),
+    .groups = "drop"
+  ) |>
+  dplyr::filter(n_obs >= 3)
+```
+
+De los `r mil(nrow(ocurrencias))` árboles del inventario, **`r mil(nrow(rasgos))`
+reúnen al menos tres fechas limpias**, el mínimo para que un resumen temporal tenga
+sentido.
+
+```{r union-etiquetas}
+etiquetas <- ocurrencias |>
+  dplyr::select(key, family, genus, species) |>
+  dplyr::distinct(key, .keep_all = TRUE)
+
+modelo_df <- rasgos |>
+  dplyr::inner_join(etiquetas, by = "key") |>
+  dplyr::mutate(clase = .data[[NIVEL]]) |>
+  dplyr::filter(!is.na(clase), clase != "")
+
+frecuencias <- modelo_df |> dplyr::count(clase, sort = TRUE)
+
+knitr::kable(head(frecuencias, 20),
+             col.names = c("Taxón", "Registros"),
+             caption = paste("Taxones con datos espectrales utilizables (nivel:", NIVEL, ")"))
+```
+
+El soporte que importa no es el nacional sino este: cuántos registros sobreviven a
+la cobertura de nubes y a la disponibilidad de escenas.
+
+```{r definir-clases}
+clases_validas <- head(frecuencias$clase[frecuencias$n >= MIN_POR_CLASE], MAX_CLASES)
+
+modelo_df <- modelo_df |>
+  dplyr::filter(clase %in% clases_validas) |>
+  dplyr::mutate(clase = factor(clase))
+
+MODELAR <- nlevels(modelo_df$clase) >= 2 &&
+           dplyr::n_distinct(modelo_df$sitio) >= 10
+```
+
+## Dónde se pierden los registros
+
+```{r embudo, fig.height=4.8}
+embudo <- data.frame(
+  etapa = factor(
+    c("Inventario completo", "Dentro de celdas procesadas",
+      "Con serie temporal (3+ fechas)", "En clases con soporte"),
+    levels = c("En clases con soporte", "Con serie temporal (3+ fechas)",
+               "Dentro de celdas procesadas", "Inventario completo")
+  ),
+  n = c(nrow(ocurrencias), cubiertos, nrow(rasgos), nrow(modelo_df))
+)
+embudo$retencion <- embudo$n / nrow(ocurrencias)
+
+ggplot(embudo, aes(x = n, y = etapa)) +
+  geom_col(aes(fill = etapa), width = 0.62) +
+  geom_text(aes(label = paste0(mil(n), "   (", pct(retencion, 0), ")")),
+            hjust = -0.08, colour = TINTA, size = 3.6) +
+  scale_fill_manual(values = setNames(rev(AZUL[c(1, 2, 4, 5)]), levels(embudo$etapa)),
+                    guide = "none") +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.22))) +
+  labs(
+    title = paste0("De ", mil(nrow(ocurrencias)), " árboles inventariados a ",
+                   mil(nrow(modelo_df)), " utilizables"),
+    subtitle = "Registros que sobreviven a cada etapa del procesamiento",
+    x = "Registros", y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+```{r tabla-embudo}
+knitr::kable(
+  data.frame(
+    Etapa = as.character(rev(embudo$etapa)),
+    Registros = mil(rev(embudo$n)),
+    Retención = pct(rev(embudo$retencion), 1)
+  ),
+  caption = "Atrición por etapa", align = c("l", "r", "r")
+)
+```
+
+Las tres caídas tienen causas distintas y conviene no confundirlas:
+
+**Celdas procesadas** (`r pct(cubiertos / nrow(ocurrencias), 0)`). Pérdida por
+decisión de alcance: se procesaron `r length(CELDAS)` celdas de las
+`r nrow(conteo_celda)` disponibles. Es la única caída reversible sin más datos —
+basta subir `N_CELDAS` y esperar más descarga.
+
+**Serie temporal** (`r pct(nrow(rasgos) / nrow(ocurrencias), 0)`). Pérdida por
+nubosidad. Ecuador es de los peores escenarios posibles para óptico: solo
+`r pct(nrow(limpio) / nrow(reflectancia), 0)` de las observaciones extraídas
+sobrevivió al enmascaramiento, y los árboles que no reúnen tres fechas limpias
+quedan fuera.
+
+**Clases con soporte** (`r pct(nrow(modelo_df) / nrow(ocurrencias), 0)`). Pérdida
+por diversidad, y la más grave. No se arregla con más escenas ni más celdas: es la
+cola larga de la curva rango-abundancia.
+
+```{r mapa-atricion, fig.height=7}
+etapa_de <- function() {
+  en_celda <- interseccion$key[interseccion$celda %in% CELDAS]
+  con_serie <- rasgos$key
+  en_modelo <- modelo_df$key
+
+  dplyr::case_when(
+    puntos_sf$key %in% en_modelo ~ "4. Usado en el modelo",
+    puntos_sf$key %in% con_serie ~ "3. Con serie, sin clase con soporte",
+    puntos_sf$key %in% en_celda  ~ "2. En celda, sin serie suficiente",
+    TRUE                         ~ "1. Fuera de las celdas procesadas"
+  )
+}
+
+puntos_atricion <- puntos_sf |> dplyr::mutate(etapa = etapa_de())
+
+orden_etapas <- c("1. Fuera de las celdas procesadas",
+                  "2. En celda, sin serie suficiente",
+                  "3. Con serie, sin clase con soporte",
+                  "4. Usado en el modelo")
+
+ggplot() +
+  geom_sf(data = huellas_sf[huellas_sf$celda %in% CELDAS, ],
+          fill = "#f0efec", colour = EJE, linewidth = 0.2) +
+  geom_sf(data = puntos_atricion |>
+            dplyr::mutate(etapa = factor(etapa, levels = orden_etapas)) |>
+            dplyr::arrange(etapa),
+          aes(colour = etapa), size = 1.3, alpha = 0.85) +
+  scale_colour_manual(values = setNames(c(EJE, AZUL[1], AZUL[3], AZUL[6]), orden_etapas),
+                      name = NULL) +
+  labs(
+    title = "La atrición en el mapa",
+    subtitle = "Etapa alcanzada por cada árbol del inventario",
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "top", legend.direction = "vertical",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+La etapa se codifica con una rampa de un solo tono porque es una escala ordenada,
+no categorías independientes: cada nivel es un filtro más exigente que el anterior.
+Los puntos oscuros —los que llegaron al modelo— no forman grupos compactos, sino que
+aparecen dispersos. Esa dispersión es parte del problema: cada clase queda
+representada por árboles de condiciones muy distintas.
+
+---
+
+# Modelo
+
+```{r sin-datos, eval=!MODELAR, echo=FALSE, results='asis'}
+cat("El dato no alcanza para entrenar un clasificador. Con el umbral de ",
+    MIN_POR_CLASE, " registros por clase al nivel de **", NIVEL,
+    "**, quedan ", nlevels(modelo_df$clase),
+    " clases utilizables, y se necesitan al menos dos.\n\n",
+    "Esto no es una falla del procesamiento: la cadena corrió completa y extrajo ",
+    nrow(limpio), " observaciones espectrales válidas. Es el inventario el que no ",
+    "tiene la densidad necesaria. La sección de conclusiones detalla qué haría falta.\n",
+    sep = "")
+```
+
+La partición se hace **por sitio de muestreo**, no por árbol. Árboles del mismo
+conglomerado comparten píxel; repartirlos entre entrenamiento y prueba inflaría la
+precisión de forma artificial.
+
+```{r particion, eval=MODELAR}
+sitios <- unique(modelo_df$sitio)
+sitios_train <- sample(sitios, size = floor(PROP_TRAIN * length(sitios)))
+
+entrenamiento <- modelo_df |> dplyr::filter(sitio %in% sitios_train)
+prueba        <- modelo_df |> dplyr::filter(!sitio %in% sitios_train)
+
+prueba <- prueba |> dplyr::filter(clase %in% unique(entrenamiento$clase))
+entrenamiento <- entrenamiento |> dplyr::mutate(clase = droplevels(clase))
+prueba        <- prueba |> dplyr::mutate(clase = factor(clase, levels = levels(entrenamiento$clase)))
+
+knitr::kable(
+  data.frame(
+    Conjunto  = c("Entrenamiento", "Prueba"),
+    Registros = c(nrow(entrenamiento), nrow(prueba)),
+    Sitios    = c(length(sitios_train), dplyr::n_distinct(prueba$sitio))
+  ),
+  caption = "Partición por sitio de muestreo", align = c("l", "r", "r")
+)
+```
+
+```{r ajuste, eval=MODELAR}
+predictores <- grep("_(med|sd|amp)$", names(modelo_df), value = TRUE)
+
+rf <- ranger::ranger(
+  as.formula(paste("clase ~", paste(predictores, collapse = " + "))),
+  data       = entrenamiento,
+  num.trees  = N_ARBOLES,
+  importance = "permutation",
+  seed       = 2026
+)
+```
+
+El bosque aleatorio se ajustó con `r mil(N_ARBOLES)` árboles sobre
+`r length(predictores)` variables. Su error interno de validación cruzada
+(*out-of-bag*) es del `r pct(rf$prediction.error)`.
+
+```{r evaluacion, eval=MODELAR}
+if (nrow(prueba) == 0) {
+  stop("El conjunto de prueba quedó vacío. Bajar PROP_TRAIN o relajar MIN_POR_CLASE.")
+}
+
+pred <- predict(rf, data = prueba)$predictions
+mc   <- table(Observado = prueba$clase, Predicho = pred)
+
+exactitud <- sum(diag(mc)) / sum(mc)
+n <- sum(mc)
+esperado <- sum(rowSums(mc) * colSums(mc)) / n^2
+kappa <- (exactitud - esperado) / (1 - esperado)
+base_mayoritaria <- max(table(entrenamiento$clase)) / nrow(entrenamiento)
+
+knitr::kable(
+  data.frame(
+    Medida = c("Exactitud global", "Kappa de Cohen",
+               "Línea base (taxón mayoritario)", "Error out-of-bag"),
+    Valor  = c(pct(exactitud), dec(kappa),
+               pct(base_mayoritaria), pct(rf$prediction.error))
+  ),
+  caption = "Desempeño sobre sitios no vistos", align = c("l", "r")
+)
+```
+
+## Veredicto
+
+```{r veredicto, eval=MODELAR, results='asis'}
+supera <- exactitud > base_mayoritaria
+margen <- exactitud - base_mayoritaria
+
+cat("> **", if (supera) "El modelo supera apenas a la línea base."
+          else "El modelo no supera a la línea base.", "**\n>\n",
+    "> Clasificar por señal espectral acertó el **", pct(exactitud),
+    "** de los casos. Predecir siempre el taxón más frecuente, sin mirar ",
+    "una sola imagen, acierta el **", pct(base_mayoritaria), "**. ",
+    "La diferencia es de ", sprintf("%+.1f", 100 * margen), " puntos.\n>\n",
+    "> El kappa de Cohen es **", dec(kappa),
+    "**, donde 0 significa concordancia equivalente al azar.\n", sep = "")
+```
+
+```{r barras-exactitud, eval=MODELAR, fig.height=3.6}
+comp <- data.frame(
+  medida = factor(c("Modelo Random Forest", "Línea base (taxón mayoritario)"),
+                  levels = c("Línea base (taxón mayoritario)", "Modelo Random Forest")),
+  valor  = c(exactitud, base_mayoritaria)
+)
+
+ggplot(comp, aes(x = valor, y = medida)) +
+  geom_col(aes(fill = medida), width = 0.5) +
+  geom_text(aes(label = pct(valor)), hjust = -0.12, colour = TINTA,
+            size = 4, fontface = "bold") +
+  scale_fill_manual(values = setNames(c(EJE, AZUL[3]), levels(comp$medida)),
+                    guide = "none") +
+  scale_x_continuous(labels = function(v) pct(v, 0), limits = c(0, max(comp$valor) * 1.3),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(
+    title = "El modelo no aporta información sobre adivinar",
+    subtitle = paste0("Exactitud sobre ", nrow(prueba),
+                      " registros de sitios no vistos en el entrenamiento"),
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+Un detalle que conviene tener presente al leer estas cifras: el conjunto de prueba
+son `r nrow(prueba)` registros repartidos en `r nlevels(prueba$clase)` clases, es
+decir alrededor de `r round(nrow(prueba) / nlevels(prueba$clase))` por clase. Con
+muestras así, la exactitud tiene una incertidumbre muy amplia. No se puede afirmar
+que el modelo sea *peor* que la línea base —sí que no hay evidencia de que sea mejor.
+
+## Matriz de confusión
+
+```{r heatmap-confusion, eval=MODELAR, fig.height=5.4}
+mc_df <- as.data.frame(mc)
+names(mc_df) <- c("Observado", "Predicho", "n")
+umbral_txt <- max(mc_df$n) * 0.55
+
+ggplot(mc_df, aes(x = Predicho, y = Observado)) +
+  geom_tile(aes(fill = n), colour = LIENZO, linewidth = 2) +
+  geom_text(aes(label = ifelse(n == 0, "", n), colour = n > umbral_txt),
+            size = 4, fontface = "bold") +
+  scale_fill_gradientn(colours = c(LIENZO, AZUL[1], AZUL[3], AZUL[6]), name = "Casos") +
+  scale_colour_manual(values = c(`TRUE` = "#ffffff", `FALSE` = TINTA), guide = "none") +
+  scale_y_discrete(limits = rev) +   # diagonal de arriba-izquierda a abajo-derecha
+  labs(
+    title = "Los errores no siguen ningún patrón",
+    subtitle = "Diagonal = acierto. Filas = taxón real, columnas = taxón predicho.",
+    x = "Predicho", y = "Observado"
+  ) +
+  tema_viz() +
+  theme(panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 25, hjust = 1))
+```
+
+```{r tabla-confusion, eval=MODELAR}
+knitr::kable(mc, caption = "Matriz de confusión sobre sitios no vistos")
+```
+
+Si el modelo capturara algo real, los errores se concentrarían entre taxones
+ecológicamente parecidos y la diagonal destacaría. Aquí no hay estructura.
+
+## ¿Por qué no separa?
+
+```{r pca, eval=MODELAR, fig.height=6.4}
+X <- as.matrix(modelo_df[, predictores, drop = FALSE])
+finitas <- apply(X, 2, function(v) all(is.finite(v)) && stats::sd(v) > 0)
+X <- X[, finitas, drop = FALSE]
+
+pc <- stats::prcomp(X, scale. = TRUE)
+var_exp <- pc$sdev^2 / sum(pc$sdev^2)
+
+pc_df <- data.frame(PC1 = pc$x[, 1], PC2 = pc$x[, 2], clase = modelo_df$clase)
+
+# Pequeños múltiplos: un panel por taxón, el resto en gris. Con más de tres
+# clases una nube de colores no es legible ni segura para daltonismo.
+panel <- do.call(rbind, lapply(levels(pc_df$clase), function(g) {
+  d <- pc_df
+  d$panel <- g
+  d$foco  <- ifelse(d$clase == g, "si", "no")
+  d
+}))
+
+ggplot(panel[order(panel$foco), ], aes(x = PC1, y = PC2)) +
+  geom_point(aes(colour = foco, size = foco), alpha = 0.8) +
+  facet_wrap(~ panel, ncol = 3) +
+  scale_colour_manual(values = c(no = "#e1e0d9", si = AZUL[3]), guide = "none") +
+  scale_size_manual(values = c(no = 0.9, si = 1.9), guide = "none") +
+  labs(
+    title = "Ningún taxón ocupa una región propia del espacio espectral",
+    subtitle = paste0("Componentes principales de las ", ncol(X),
+                      " variables espectro-temporales (PC1: ", pct(var_exp[1], 0),
+                      " de la varianza, PC2: ", pct(var_exp[2], 0), ")"),
+    caption = "En cada panel, el taxón indicado en azul; los demás registros en gris."
+  ) +
+  tema_viz() +
+  theme(axis.text = element_blank())
+```
+
+Esta es la explicación en una imagen. Si los taxones fueran separables, cada panel
+mostraría los puntos azules agrupados en una zona distinta. En cambio se reparten
+por toda la nube, mezclados con los demás. El clasificador no falla por mal
+ajustado: falla porque la información no está en los datos.
+
+## Perfiles temporales
+
+```{r perfiles, eval=MODELAR, fig.height=5}
+perfiles <- limpio |>
+  dplyr::inner_join(dplyr::select(modelo_df, key, clase), by = "key")
+
+ggplot(perfiles, aes(x = fecha, y = ndvi, colour = clase, group = clase)) +
+  stat_summary(fun = median, geom = "line", linewidth = 0.9) +
+  stat_summary(fun = median, geom = "point", size = 2.3) +
+  scale_colour_manual(values = setNames(PAL_CAT[seq_len(nlevels(perfiles$clase))],
+                                       levels(perfiles$clase)), name = NULL) +
+  scale_x_date(expand = expansion(mult = c(0.03, 0.03))) +
+  labs(
+    title = "Los perfiles de NDVI se solapan entre taxones",
+    subtitle = "Mediana por fecha de adquisición",
+    x = NULL, y = "NDVI"
+  ) +
+  tema_viz() +
+  theme(legend.position = "top")
+```
+
+```{r tabla-perfiles, eval=MODELAR}
+perfiles |>
+  dplyr::group_by(clase, fecha) |>
+  dplyr::summarise(ndvi = median(ndvi, na.rm = TRUE), .groups = "drop") |>
+  dplyr::mutate(ndvi = round(ndvi, 3)) |>
+  tidyr::pivot_wider(names_from = fecha, values_from = ndvi) |>
+  knitr::kable(caption = "Mediana de NDVI por taxón y fecha")
+```
+
+Las curvas se cruzan y se superponen. En una plantación monoespecífica estas líneas
+irían separadas, porque cada especie tiene su propia fenología y su propio calendario
+de manejo. Bajo dosel natural cerrado, lo que mide el sensor es el dosel del
+conjunto, no el árbol registrado en la parcela.
+
+## Variables más informativas
+
+```{r importancia, eval=MODELAR, fig.height=5.6}
+imp <- sort(ranger::importance(rf), decreasing = TRUE)
+imp_df <- data.frame(variable = names(imp), importancia = as.numeric(imp))
+
+ggplot(head(imp_df, 18), aes(x = importancia, y = reorder(variable, importancia))) +
+  geom_col(fill = AZUL[3], width = 0.68) +
+  labs(
+    title = "Variables más informativas del modelo",
+    subtitle = "Importancia por permutación. El orden es informativo aun cuando el modelo no discrimina.",
+    x = "Importancia", y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+El sufijo indica el resumen temporal: `_med` es la mediana de la serie, `_sd` su
+dispersión y `_amp` su amplitud. Que pesen las variables de infrarrojo de onda corta
+(`swir16`, `swir22`) y los índices de humedad es coherente con lo que se sabe de
+discriminación de vegetación —el contenido de agua del dosel es informativo. Pero un
+orden de importancia sobre un modelo que no discrimina describe de dónde salió el
+poco ruido aprovechado, no una señal biológica.
+
+---
+
+# Conclusiones
+
+```{r cierre, results='asis'}
+if (MODELAR) {
+  cat("La respuesta a la pregunta planteada es **no**: con los datos del inventario ",
+      "forestal nacional como referencia, no es viable discriminar taxones ",
+      "forestales en Ecuador mediante imágenes satelitales de acceso abierto.\n\n",
+      "El clasificador se entrenó sobre ", nlevels(modelo_df$clase),
+      " taxones al nivel de ", NIVEL, ", alcanzó una exactitud de ", pct(exactitud),
+      " frente a una línea base de ", pct(base_mayoritaria),
+      ", y un kappa de ", dec(kappa), ". ",
+      "Un kappa bajo 0,20 indica concordancia marginal; el obtenido está prácticamente ",
+      "en cero.\n\n",
+      "La cadena técnica, en cambio, funciona: se descargaron y procesaron ",
+      mil(nrow(reflectancia)), " observaciones espectrales sobre ",
+      length(catalogo_celdas), " celdas, sin credenciales ni costo. ",
+      "El problema no es el procesamiento sino el dato de referencia.\n", sep = "")
+} else {
+  cat("La cadena técnica funciona de extremo a extremo. Lo que no alcanza es el ",
+      "dato de referencia: ninguna clase reunió registros suficientes.\n", sep = "")
+}
+```
+
+## Las dos limitaciones de fondo
+
+Conviene no confundirlas, porque tienen remedios distintos.
+
+**La resolución.** El inventario registra árboles individuales bajo dosel cerrado,
+mientras que un píxel Sentinel-2 de 10 m integra la respuesta de todo lo que hay en
+100 m². Un árbol del sotobosque no aporta señal detectable. Ninguna cantidad de
+datos adicionales corrige esto.
+
+**La densidad.** El inventario cubre nueve estratos de bosque con una diversidad
+altísima: la mayoría de taxones aparece una o dos veces en todo el país. Un
+clasificador necesita decenas de ejemplos por clase, y agregando al nivel de familia
+apenas se llega al umbral para un puñado de ellas.
+
+La segunda se arregla con más datos; la primera, no. Y las dos apuntan al mismo
+diagnóstico: este conjunto mide el **piso** de lo alcanzable, no el potencial del
+método.
+
+## Qué sí funcionaría
+
+El escenario favorable es exactamente el inverso del que se probó aquí:
+
+| | Inventario forestal nacional | Plantación comercial |
+|---|---|---|
+| Unidad registrada | Árbol individual | Rodal completo |
+| Píxeles por unidad | Menos de uno | Decenas a cientos |
+| Composición | Dosel mixto, hiperdiverso | Monoespecífica |
+| Taxones a separar | Cientos | Cuatro o cinco |
+| Ejemplos por clase | Uno o dos | Cientos de rodales |
+
+En una plantación el polígono entero corresponde a una especie, de modo que la
+limitación de resolución desaparece: el sensor mide justamente lo que se quiere
+clasificar. Y con pocas especies comerciales y muchos rodales por especie, la
+limitación de densidad también desaparece.
+
+Fuentes de etiquetas con esa forma:
+
+- **SDPT v2** (WRI / Global Forest Watch): polígonos de plantación con especie,
+  descarga directa, cobertura casi global.
+- **Mapa de plantaciones forestales incentivadas del Ecuador** (MAG), escala 1:5.000,
+  periodo 2013–2018.
+
+Lo aprovechable de este ejercicio es la maquinaria, que queda validada: la búsqueda
+en el catálogo, la lectura remota de los COG sin descargar escenas completas, el
+enmascaramiento de nubes, el resumen espectro-temporal y la validación por sitio.
+Para reorientarlo hacia plantaciones se sustituye el origen de los registros
+—centroides de rodal en lugar de árboles— y el resto de la cadena sigue igual.
+
+## Nota sobre la validación
+
+Dos decisiones metodológicas sostienen la credibilidad de las cifras anteriores, y
+vale la pena señalarlas porque es fácil omitirlas y obtener resultados mucho más
+halagadores:
+
+**La partición es por sitio de muestreo, no por árbol.** Los árboles de un mismo
+conglomerado caen en el mismo píxel o en píxeles vecinos. Repartirlos entre
+entrenamiento y prueba habría dejado copias casi idénticas a ambos lados, con
+exactitudes aparentes muy superiores y sin ningún valor predictivo.
+
+**La línea base está explícita.** Una exactitud del `r if (exists("exactitud")) pct(exactitud) else "—"`
+suena a algo hasta que se compara con lo que se obtiene sin mirar una sola imagen.
+Reportar exactitud sin su línea base es la forma más común de disfrazar un modelo
+que no aprende.
+
+```{r sesion, echo=FALSE}
+sessionInfo()
+```

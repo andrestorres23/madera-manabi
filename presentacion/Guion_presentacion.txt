@@ -1,0 +1,241 @@
+GUION DEL EXPOSITOR
+Presentación: ¿Cuánta madera habrá en Manabí?
+Andrés Acuña · Proyecto de Vinculación: Práctica de Servicio Comunitario a la ESPOCH – GRUPO A
+Duración estimada: 18–22 minutos (19 diapositivas)
+
+==============================================================================
+
+DIAPOSITIVA 1 — Portada
+------------------------------------------------------------------------------
+
+Buenos días. Voy a contarles un trabajo que empezó con una pregunta simple: cuánta madera
+comercial hay en Manabí, y cuánta habrá dentro de cincuenta años si el clima cambia. La
+pregunta parece de inventario forestal, pero terminó siendo un problema de datos y de
+modelación. Les adelanto el final: sí llegamos a metros cúbicos, pero con supuestos que voy
+a declarar en voz alta, porque esa es la diferencia entre un número útil y un número bonito.
+
+
+DIAPOSITIVA 2 — El problema de partida
+------------------------------------------------------------------------------
+
+Aquí está el nudo del trabajo. Queríamos metros cúbicos. Pero al abrir el inventario
+nacional publicado en GBIF descubrimos que no es un censo: registra aproximadamente un árbol
+testigo por especie y por parcela. Lo comprobamos de tres formas — la densidad implícita
+daba diecinueve árboles por hectárea cuando un bosque tropical tiene entre cuatrocientos y
+seiscientos; ninguna especie se repetía dentro de una parcela; y la numeración de campo
+tenía huecos. Sin densidad no hay expansión a hectárea. La tentación era decir 'no se puede'
+y entregar solo el análisis climático. Decidimos lo contrario: declarar el supuesto que
+falta, ponerle un rango, y medir cuánto mueve el resultado.
+
+
+DIAPOSITIVA 3 — Cómo lo resolvimos
+------------------------------------------------------------------------------
+
+El método tiene tres piezas y las tres hacen falta. La primera: un modelo de nicho climático
+que aprende qué clima tolera cada especie y lo proyecta a 2070. La segunda: cobertura
+arbórea satelital, que nos dice dónde hay árboles de verdad y filtra el pasto, el cultivo y
+la ciudad. La tercera: cuánto rinde una hectárea, que sale del volumen por árbol medido en
+campo multiplicado por una densidad supuesta. Si quitan cualquiera de las tres el resultado
+deja de tener sentido. Con solo clima dirían dónde podría crecer, no dónde hay. Con solo
+cobertura tendrían hectáreas, no metros cúbicos. Con solo rendimiento no habría futuro.
+
+
+DIAPOSITIVA 4 — El área de estudio
+------------------------------------------------------------------------------
+
+Manabí tiene veintidós cantones y casi veinte mil kilómetros cuadrados. Elegimos el cantón
+como unidad de agregación porque es donde se toman las decisiones de manejo. Un detalle
+metodológico: el modelo no se entrena solo con Manabí, sino con un halo de ciento cincuenta
+kilómetros alrededor. Si entrenáramos solo dentro de la provincia el modelo no vería
+suficiente variación climática para aprender qué prefiere cada especie.
+
+
+DIAPOSITIVA 5 — De dónde aprende el modelo
+------------------------------------------------------------------------------
+
+Esto es lo que alimenta al modelo. Cada punto es un registro verificado de presencia,
+descargado de GBIF. Es importante entender que el modelo no ve el mapa: ve el clima de esos
+puntos. Y hay un sesgo que conviene declarar antes de que alguien lo pregunte: los registros
+se concentran cerca de carreteras y poblados, porque ahí es donde la gente observa. Eso
+significa que el modelo aprende en parte dónde hay observadores, no solo dónde hay especies.
+No lo corregimos; lo declaramos.
+
+
+DIAPOSITIVA 6 — Cuánto cambia el clima
+------------------------------------------------------------------------------
+
+Antes de hablar de especies conviene ver el motor. Esto es cuánto sube la temperatura media
+en Manabí según los tres escenarios. Fíjense en dos cosas. Primero, sube en los tres,
+incluso en el optimista: eso ya está comprometido. Segundo, la diferencia entre escenarios
+se abre con el tiempo — hacia 2030 son parecidos, hacia 2070 no. Eso significa que las
+decisiones de emisiones de esta década determinan el escenario de finales de siglo, no el de
+la próxima.
+
+
+DIAPOSITIVA 7 — Cómo funciona el modelo
+------------------------------------------------------------------------------
+
+Aquí abrimos la caja negra. La variable que el modelo predice es binaria: vale uno donde hay
+un registro de la especie y cero en puntos de fondo tomados al azar en la región. El modelo
+aprende qué combinaciones de clima separan unos de otros. Estas curvas muestran qué predice
+al mover una variable dejando las demás en su valor mediano. Si la curva sube, más de esa
+variable favorece a la especie. Si hace una campana, hay un óptimo intermedio. Si sale
+plana, el modelo simplemente no usa esa variable. Los escalones bruscos son la firma de los
+modelos de árboles, que parten el rango en tramos.
+
+
+DIAPOSITIVA 8 — ¿Y funciona?
+------------------------------------------------------------------------------
+
+Esta es la diapositiva más honesta de la presentación. Comparamos tres algoritmos y los
+validamos de forma espacial: el modelo se entrena en unas zonas geográficas y se evalúa en
+otras que no vio nunca. Si partiéramos al azar, puntos vecinos quedarían a ambos lados y el
+modelo sacaría buenas notas por reconocer sitios ya vistos. El resultado: solo dos de las
+cinco especies superan el umbral aceptable. Las otras tres tienen un AUC cercano a 0,60,
+apenas mejor que lanzar una moneda. Las reportamos porque ocultarlas sería peor, pero sus
+proyecciones no sostienen ninguna conclusión por precisa que parezca la cifra.
+
+
+DIAPOSITIVA 9 — Dónde puede crecer hoy
+------------------------------------------------------------------------------
+
+Este es el resultado del modelo para el presente. Verde intenso significa que el clima de
+ese píxel se parece al de los lugares donde la especie está documentada. Y aquí hay que ser
+muy preciso con el lenguaje, porque es donde más se confunde la gente: el mapa no dice que
+haya árboles ahí, ni que vayan a llegar. Dice que el clima no sería el impedimento. Entre
+'el clima lo permite' y 'ahí hay un bosque' median la dispersión de semillas, el uso del
+suelo y la demografía del rodal, y ninguna de las tres está en el modelo.
+
+
+DIAPOSITIVA 10 — Qué variable manda
+------------------------------------------------------------------------------
+
+Esta figura responde a qué mira el modelo para decidir. Mide cuánto empeora la predicción si
+se desordena una variable. Lo interesante es que dominan las variables de lluvia por encima
+de las de temperatura. Eso es coherente con lo que sabemos del bosque seco tumbesino: ahí el
+factor limitante es el agua, no el calor. Y tiene una implicación práctica — si el cambio
+climático altera el régimen de lluvias más que la temperatura, el efecto sobre estas
+especies será mayor de lo que sugeriría mirar solo el calentamiento.
+
+
+DIAPOSITIVA 11 — El panorama a 2070
+------------------------------------------------------------------------------
+
+Si tuviera que quedarme con una sola figura sería esta. Cada panel es una especie, cada fila
+un escenario de emisiones y cada columna un horizonte temporal. Rojo es pérdida de aptitud,
+azul es ganancia. Léanla en dos direcciones: si el color se intensifica hacia la derecha, el
+efecto crece con el tiempo; si se intensifica hacia abajo, depende del escenario de
+emisiones. El caso más llamativo es Cordia alliodora, el laurel, que pierde más de la mitad
+de su idoneidad bajo altas emisiones. Es además una de las especies maderables más usadas en
+la costa.
+
+
+DIAPOSITIVA 12 — El mapa del cambio
+------------------------------------------------------------------------------
+
+El mismo resultado, ahora en el espacio. Rojo significa que hacia 2070 el clima de ese lugar
+se aleja del que la especie tolera; azul, que se acerca. La lectura operativa es directa: si
+están planificando una plantación a turno largo, plantar hoy en una zona roja es apostar
+contra la tendencia. Y conviene recordar algo que dije antes — la pérdida de idoneidad no se
+manifiesta primero como árboles muertos, sino como plántulas que no prosperan. El árbol
+adulto aguanta décadas; el problema aparece en la regeneración.
+
+
+DIAPOSITIVA 13 — Dónde plantar qué
+------------------------------------------------------------------------------
+
+Esta es la diapositiva accionable. Si mañana hay presupuesto para un programa de plantación,
+aquí está a qué cantón ir con qué especie. Una advertencia sobre los números: los valores
+absolutos son bajos porque el modelo compara cada sitio contra todo el fondo regional, no
+contra un ideal. Lo que importa es el orden, no la cifra. Y noten que los cantones no se
+repiten entre especies, lo cual tiene sentido: cada una tiene su propio nicho. Por eso,
+dicho sea de paso, no promediamos la idoneidad entre especies — mezclar nichos distintos da
+un número sin significado.
+
+
+DIAPOSITIVA 14 — Cuánto bosque hay realmente
+------------------------------------------------------------------------------
+
+Esta no es una figura de resultados, es un insumo, y por eso la explico aparte. Es cobertura
+arbórea medida por satélite a treinta metros de resolución. Nos dice que el setenta por
+ciento de Manabí tiene dosel por encima del treinta por ciento. Su papel en el trabajo es el
+de filtro: el mapa de idoneidad dice dónde el clima permitiría una especie, y este dice
+dónde hay árboles de hecho. Solo la intersección de los dos produce metros cúbicos creíbles.
+La siguiente diapositiva muestra por qué eso importa tanto.
+
+
+DIAPOSITIVA 15 — El atajo que infla la cifra
+------------------------------------------------------------------------------
+
+Aquí está la trampa metodológica más fácil de caer, y quiero mostrarla explícitamente porque
+la vi propuesta en más de un lado. El atajo sería multiplicar el rendimiento por hectárea
+por la superficie climáticamente idónea. La barra gris es esa superficie; la verde es la
+parte que además tiene bosque. La distancia entre ambas es el error que se cometería. En
+nuestro caso la cifra saldría varias veces inflada. Y hay un segundo problema que no se ve
+en el gráfico: las áreas idóneas de las cinco especies se solapan, así que sumarlas contaría
+el mismo terreno varias veces. Por eso las presentamos como alternativas, nunca como un
+total provincial.
+
+
+DIAPOSITIVA 16 — Cuántos metros cúbicos
+------------------------------------------------------------------------------
+
+Y aquí está finalmente la respuesta en metros cúbicos. Pero léanla con cuidado. La línea es
+el valor central y la banda cubre el rango de densidad de fustes que supusimos, entre
+trescientos y seiscientos árboles por hectárea. La banda es ancha porque ese supuesto no
+está medido, y es honesto que se vea. Lo importante es esto: lo defendible de este gráfico
+es la pendiente, no la altura. El porcentaje de cambio entre hoy y 2070 no depende del
+supuesto de densidad, porque se cancela al hacer el cociente. El valor absoluto sí depende.
+Si alguien les pregunta la cifra exacta, esa es la respuesta correcta.
+
+
+DIAPOSITIVA 17 — De qué depende el resultado
+------------------------------------------------------------------------------
+
+Terminamos con la pregunta que siempre hace un evaluador: de qué depende su número. Este
+análisis varía un parámetro a la vez y recalcula todo desde el mapa — no multiplica el
+resultado por un factor, que sería suponer lo que queremos averiguar. La lección práctica es
+clara: la densidad de fustes entra como factor multiplicativo directo, así que su efecto es
+exactamente proporcional. Eso significa que una sola campaña de medición de densidad en
+campo reduciría la incertidumbre de todo el trabajo más que cualquier refinamiento del
+modelo climático. Ahí es donde hay que gastar el próximo dólar.
+
+
+DIAPOSITIVA 18 — Qué podemos afirmar
+------------------------------------------------------------------------------
+
+Cierro con lo que se puede afirmar y lo que no, que para mí es la parte más importante.
+Sólido: el cambio relativo entre escenarios, porque los supuestos se cancelan al hacer el
+cociente. Utilizable: el ranking de cantones por especie, que es directamente accionable.
+Con reservas: el valor absoluto en metros cúbicos, que es un potencial condicionado y no
+existencias medidas. Y no afirmable: las proyecciones de las tres especies cuyo modelo no
+supera el umbral, y cualquier total provincial que sume especies, porque sus áreas se
+solapan. Prefiero entregar cuatro afirmaciones defendibles que veinte que no resistan la
+primera pregunta.
+
+
+DIAPOSITIVA 19 — Qué haría falta
+------------------------------------------------------------------------------
+
+Y termino con lo que falta, porque un trabajo honesto también dice qué le falta. Primero, el
+inventario completo del MAATE: tiene todos los fustes por parcela y los factores de
+expansión del muestreo, y convertiría nuestro supuesto de densidad en un dato medido.
+Segundo, parcelas permanentes con remedición: dos mediciones separadas en el tiempo dan la
+tasa de crecimiento real, que hoy suponemos. Tercero, el mapa de plantaciones del MAG, que
+permitiría separar plantación de bosque natural — algo imposible con el dato actual. Con
+esas tres piezas este trabajo deja de ser una estimación con supuestos y pasa a ser un
+inventario proyectado. Gracias, y quedo atento a preguntas.
+
+==============================================================================
+
+RECOMENDACIONES
+
+- Ritmo: aproximadamente un minuto por diapositiva de figura.
+- Las diapositivas 9 y 17 son las que más preguntas generan: la de desempeño
+  de los modelos y la del volumen. Conviene tenerlas bien ensayadas.
+- Si el tiempo aprieta, se pueden omitir las diapositivas 11 (importancia de
+  variables) y 14 (dónde plantar qué) sin romper el hilo.
+- Pregunta probable: "¿por qué no dan una cifra exacta?". Respuesta: porque
+  la densidad de fustes no está medida; el porcentaje de cambio sí es firme.
+- Pregunta probable: "¿esto dice dónde estarán los árboles?". Respuesta: no,
+  dice dónde el clima lo permitirá. Faltan dispersión, suelo y uso del suelo.

@@ -1,0 +1,2375 @@
+---
+title: "Madera comercial en el bosque nativo del Ecuador"
+subtitle: "Qué permite y qué no el inventario forestal público, y dónde entra el satélite"
+author: "Andrés Acuña"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.width = 9, fig.height = 5.5, dpi = 130, fig.align = "center"
+)
+options(timeout = 1800, scipen = 999)
+```
+
+```{r estilo, include=FALSE}
+PAL_CAT <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+AZUL    <- c("#86b6ef", "#5598e7", "#2a78d6", "#256abf", "#184f95", "#0d366b")
+TINTA   <- "#0b0b0b"; TINTA_2 <- "#52514e"; APAGADO <- "#898781"
+REJILLA <- "#e1e0d9"; EJE <- "#c3c2b7"; LIENZO <- "#fcfcfb"
+ALERTA  <- "#d03b3b"
+
+tema_viz <- function(base = 12) {
+  ggplot2::theme_minimal(base_size = base) +
+    ggplot2::theme(
+      plot.background  = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.background = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.grid.major = ggplot2::element_line(colour = REJILLA, linewidth = 0.3),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line   = ggplot2::element_line(colour = EJE, linewidth = 0.4),
+      axis.ticks  = ggplot2::element_blank(),
+      axis.text   = ggplot2::element_text(colour = APAGADO, size = base - 2),
+      axis.title  = ggplot2::element_text(colour = TINTA_2, size = base - 1),
+      plot.title  = ggplot2::element_text(colour = TINTA, face = "bold", size = base + 2,
+                                          margin = ggplot2::margin(b = 4)),
+      plot.subtitle = ggplot2::element_text(colour = TINTA_2, size = base - 1,
+                                            margin = ggplot2::margin(b = 10)),
+      plot.caption  = ggplot2::element_text(colour = APAGADO, size = base - 3, hjust = 0),
+      legend.text   = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.title  = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.key.size = grid::unit(0.45, "cm"),
+      strip.text = ggplot2::element_text(colour = TINTA, face = "bold", size = base - 2),
+      plot.title.position = "plot"
+    )
+}
+
+pct <- function(x, d = 1) paste0(sub("\\.", ",", sprintf(paste0("%.", d, "f"), 100 * x)), "%")
+mil <- function(x) format(x, big.mark = ".", decimal.mark = ",", trim = TRUE)
+num <- function(x, d = 2) sub("\\.", ",", sprintf(paste0("%.", d, "f"), x))
+
+# Banderas de disponibilidad. Se inicializan todas aquí, en un bloque que siempre
+# corre: si el bloque que calcula una de ellas queda desactivado por una bandera
+# anterior, los bloques que la usan como condición igual la encuentran definida.
+HAY_CHIPS <- FALSE; HAY_REG <- FALSE; MODELAR <- FALSE
+HAY_MESES <- FALSE; HAY_SERIE <- FALSE; HAY_MOSAICO <- FALSE
+HAY_CLIMA <- FALSE; HAY_ACOPLE <- FALSE; HAY_AP <- FALSE; HAY_ESP_MAN <- FALSE
+```
+
+```{r paquetes, include=FALSE}
+paquetes <- c("jsonlite", "rstac", "terra", "sf", "dplyr", "tidyr",
+              "ggplot2", "scales", "ranger", "knitr")
+faltantes <- paquetes[!paquetes %in% rownames(installed.packages())]
+if (length(faltantes) > 0) install.packages(faltantes, quiet = TRUE)
+invisible(lapply(paquetes, library, character.only = TRUE))
+
+terra::setGDALconfig("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+terra::setGDALconfig("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".tif")
+terra::setGDALconfig("GDAL_HTTP_MULTIPLEX", "YES")
+terra::setGDALconfig("VSI_CACHE", "TRUE")
+terra::setGDALconfig("GDAL_HTTP_MAX_RETRY", "5")
+terra::setGDALconfig("GDAL_HTTP_RETRY_DELAY", "2")
+set.seed(2026)
+```
+
+```{r parametros, include=FALSE}
+DATASET_GBIF <- "442e07a0-4b6c-499f-a68d-706ed112c1ac"
+STAC_URL     <- "https://earth-search.aws.element84.com/v1"
+COLECCION    <- "sentinel-2-l2a"
+
+FECHA_INI <- "2022-01-01"
+FECHA_FIN <- "2024-12-31"
+VENTANA   <- paste0(FECHA_INI, "T00:00:00Z/", FECHA_FIN, "T23:59:59Z")
+
+NUBE_MAX  <- 35
+N_ESCENAS <- 6
+N_CELDAS  <- 6
+
+# --- Parámetros dasométricos ---
+FACTOR_FORMA <- 0.65   # coeficiente mórfico del fuste; el volumen escala lineal con él
+DMC          <- 60     # diámetro mínimo de corta, en cm
+
+MIN_POR_CLASE <- 25
+PROP_TRAIN    <- 0.70
+N_ARBOLES     <- 800
+
+# --- Recortes de imagen ---
+LADO_CHIP <- 2000   # lado del recorte en metros
+N_CHIPS   <- 4      # conglomerados a ilustrar
+
+# Altura de dosel GLAD (Potapov 2019, 30 m). El archivo continental es de varios
+# gigabytes y no está garantizado que sea un GeoTIFF en mosaico, de modo que la
+# lectura remota puede tardar mucho. Se deja apagado para que la primera
+# compilación no se cuelgue; ponerlo en TRUE para intentarlo.
+USAR_ALTURA_DOSEL <- FALSE
+URL_ALTURA <- "https://glad.geog.umd.edu/Potapov/Forest_height_2019/Forest_height_2019_SAM.tif"
+
+# --- Sección Manabí ---
+MANABI_LON <- -80.45   # centro del área de estudio (cerca de Portoviejo)
+MANABI_LAT <- -1.00
+MANABI_RADIO_KM <- 25  # radio del área de imágenes
+MANABI_BUSQUEDA_KM <- 150  # radio para buscar conglomerados del inventario
+N_MUESTRA  <- 250      # puntos de muestreo dentro del área
+MANABI_INI <- "2023-01-01"  # inicio de la serie mensual
+HORIZONTE  <- 36       # meses de proyección hacia adelante
+
+# --- Crecimiento del arbolado ---
+# Incremento diamétrico corriente anual. El inventario tiene una sola medición por
+# árbol, de modo que el crecimiento no se estima del dato: se supone. Valor típico
+# en bosque nativo tropical húmedo; el volumen proyectado es sensible a este número.
+IC_ANUAL <- 0.40       # cm de DAP por año
+HORIZONTE_ANIOS <- 3
+FACTOR_SECO   <- 0.80  # el crecimiento cae en años secos
+FACTOR_HUMEDO <- 1.15
+NUBE_MAX_MES <- 60     # nubosidad tolerada en la serie mensual (más laxa: es la costa)
+USAR_AREAS_PROTEGIDAS <- TRUE
+
+BANDAS <- c("blue", "green", "red", "nir", "swir16", "swir22")
+
+CACHE_DIR <- "cache_madera"
+FORZAR    <- FALSE
+```
+
+```{r cache-helper, include=FALSE}
+dir.create(CACHE_DIR, showWarnings = FALSE, recursive = TRUE)
+
+en_cache <- function(nombre, expr, forzar = FORZAR, columnas = NULL) {
+  ruta <- file.path(CACHE_DIR, paste0(nombre, ".rds"))
+  if (!forzar && file.exists(ruta)) {
+    guardado <- readRDS(ruta)
+    vigente <- is.null(columnas) || all(columnas %in% names(guardado))
+    if (vigente) { message("[cache] se reutiliza ", nombre); return(guardado) }
+    message("[cache] obsoleta, se rehace ", nombre)
+  }
+  message("[red]   se descarga ", nombre)
+  valor <- expr
+  saveRDS(valor, ruta)
+  valor
+}
+
+limpiar_cache <- function() unlink(file.path(CACHE_DIR, "*.rds"))
+```
+
+# Lo que este documento responde
+
+La pregunta de origen era si se puede estudiar tipos de madera con imágenes
+satelitales para aprovechamiento forestal, y cuantificar la madera comercial.
+
+La respuesta corta, ordenada por lo que más importa:
+
+**No se puede calcular volumen por hectárea con el dato público.** La Segunda
+Evaluación Nacional Forestal publicada en GBIF no es un censo de todos los árboles
+de cada parcela, sino un registro de composición florística: aproximadamente un
+árbol testigo por especie y parcela. La sección 2 demuestra esto con los datos
+mismos. Cualquier cifra de m³/ha calculada sobre esta base sería una subestimación
+grave con apariencia de cifra oficial.
+
+**Sí se puede caracterizar el arbolado registrado.** Cada árbol trae diámetro a la
+altura del pecho y altura comercial, de modo que su volumen individual es
+calculable. Eso permite responder qué especies alcanzan tamaño aprovechable, cuánta
+madera rinde cada una por árbol y cómo se distribuyen los diámetros.
+
+**Sí se puede mapear el tipo de bosque.** El inventario clasifica cada sitio según
+su grado de intervención, lo que da un mapa de tipos con base en dato de campo.
+
+**El satélite sirve para el tipo de bosque, no para la especie.** Distinguir bosque
+maduro de intervenido es una señal estructural que el sensor puede ver. Identificar
+la especie de un árbol bajo dosel cerrado, no.
+
+La sección final detalla qué habría que solicitar al MAATE para llegar a un
+inventario volumétrico real.
+
+---
+
+# El dato de referencia
+
+```{r descarga-gbif}
+URI_EMOF <- "http://rs.iobis.org/obis/terms/ExtendedMeasurementOrFact"
+URI_TIPO <- "http://rs.tdwg.org/dwc/terms/measurementType"
+URI_VAL  <- "http://rs.tdwg.org/dwc/terms/measurementValue"
+
+# Las mediciones dasométricas viajan en una extensión, no en el núcleo del registro
+medida <- function(reg, tipo) {
+  ext <- reg$extensions[[URI_EMOF]]
+  if (is.null(ext)) return(NA_real_)
+  for (m in ext) {
+    if (identical(m[[URI_TIPO]], tipo)) {
+      v <- suppressWarnings(as.numeric(gsub(",", ".", m[[URI_VAL]])))
+      if (!is.na(v)) return(v)
+    }
+  }
+  NA_real_
+}
+
+campo <- function(reg, nm) {
+  v <- reg[[nm]]
+  if (is.null(v) || length(v) == 0) NA else as.character(v[[1]])
+}
+
+# La caché de reflectancia se generó con un descargador previo que guardaba la
+# clave como número. Se normaliza a texto en ambos lados para poder cruzarlas
+# sin tener que volver a extraer todo.
+clave_txt <- function(x) {
+  if (is.numeric(x)) format(x, scientific = FALSE, trim = TRUE) else as.character(x)
+}
+
+fila_de <- function(reg) {
+  data.frame(
+    key           = if (is.null(reg$key)) NA_character_ else clave_txt(reg$key[[1]]),
+    occurrenceID  = campo(reg, "occurrenceID"),
+    eventID       = campo(reg, "eventID"),
+    scientificName = campo(reg, "scientificName"),
+    family        = campo(reg, "family"),
+    genus         = campo(reg, "genus"),
+    species       = campo(reg, "species"),
+    lat           = suppressWarnings(as.numeric(campo(reg, "decimalLatitude"))),
+    lon           = suppressWarnings(as.numeric(campo(reg, "decimalLongitude"))),
+    eventDate     = campo(reg, "eventDate"),
+    stateProvince = campo(reg, "stateProvince"),
+    habitat       = campo(reg, "habitat"),
+    elevacion     = campo(reg, "verbatimElevation"),
+    area_m2       = suppressWarnings(as.numeric(campo(reg, "sampleSizeValue"))),
+    dap           = medida(reg, "dap"),
+    h_comercial   = medida(reg, "altura_comercial_estimada"),
+    h_total       = medida(reg, "altura_total_estimada"),
+    stringsAsFactors = FALSE
+  )
+}
+
+descargar_gbif <- function(dataset_key, por_pagina = 300) {
+  base <- paste0("https://api.gbif.org/v1/occurrence/search",
+                 "?datasetKey=", dataset_key,
+                 "&hasCoordinate=true&hasGeospatialIssue=false",
+                 "&limit=", por_pagina, "&offset=")
+  partes <- list(); offset <- 0
+  repeat {
+    resp <- jsonlite::fromJSON(paste0(base, offset), simplifyVector = FALSE)
+    if (length(resp$results) == 0) break
+    partes[[length(partes) + 1]] <- do.call(rbind, lapply(resp$results, fila_de))
+    offset <- offset + por_pagina
+    if (isTRUE(resp$endOfRecords) || offset >= resp$count) break
+  }
+  do.call(rbind, partes)
+}
+
+arboles <- en_cache(paste0("gbif_med_", substr(DATASET_GBIF, 1, 8)),
+                    descargar_gbif(DATASET_GBIF),
+                    columnas = c("dap", "h_comercial", "habitat", "eventID"))
+
+arboles <- arboles |>
+  dplyr::filter(!is.na(lat), !is.na(lon)) |>
+  dplyr::mutate(sitio = paste(round(lat, 3), round(lon, 3), sep = "_"))
+```
+
+```{r resumen-datos}
+con_dap <- sum(!is.na(arboles$dap))
+con_hc  <- sum(!is.na(arboles$h_comercial))
+
+knitr::kable(
+  data.frame(
+    Concepto = c("Árboles registrados", "Con diámetro (DAP)", "Con altura comercial",
+                 "Conglomerados", "Especies distintas", "Familias distintas"),
+    Cantidad = mil(c(nrow(arboles), con_dap, con_hc,
+                     dplyr::n_distinct(arboles$eventID),
+                     dplyr::n_distinct(arboles$species, na.rm = TRUE),
+                     dplyr::n_distinct(arboles$family, na.rm = TRUE)))
+  ),
+  caption = "Segunda Evaluación Nacional Forestal del Ecuador Continental (MAATE, 2022–2023)",
+  align = c("l", "r")
+)
+```
+
+---
+
+# Por qué no es un censo
+
+Esta sección importa más que ninguna otra, porque de ella depende que las cifras del
+resto sean defendibles. Tres evidencias, todas verificables sobre el dato descargado.
+
+## Densidad de árboles imposible
+
+```{r evidencia-densidad}
+por_cong <- arboles |>
+  dplyr::group_by(eventID) |>
+  dplyr::summarise(arboles = dplyr::n(),
+                   area = dplyr::first(area_m2), .groups = "drop") |>
+  dplyr::filter(!is.na(area), area > 0) |>
+  dplyr::mutate(por_ha = arboles / (area / 10000))
+
+dens_mediana <- median(por_cong$por_ha, na.rm = TRUE)
+
+knitr::kable(
+  data.frame(
+    Concepto = c("Árboles por conglomerado (mediana)",
+                 "Superficie declarada por conglomerado",
+                 "Densidad implícita",
+                 "Densidad esperable en bosque tropical maduro (DAP ≥ 10 cm)"),
+    Valor = c(mil(median(por_cong$arboles)),
+              paste(mil(median(por_cong$area, na.rm = TRUE)), "m²"),
+              paste(num(dens_mediana, 0), "árboles/ha"),
+              "400 – 600 árboles/ha")
+  ),
+  caption = "Contraste de densidad", align = c("l", "r")
+)
+```
+
+La densidad implícita es de `r num(dens_mediana, 0)` árboles por hectárea. Un bosque
+tropical maduro tiene entre 400 y 600 árboles por hectárea con diámetro sobre 10 cm.
+El registro publicado contiene una fracción muy pequeña de los árboles que hay en
+cada parcela.
+
+## Las especies no se repiten dentro de una parcela
+
+```{r evidencia-repeticion}
+repeticion <- arboles |>
+  dplyr::filter(!is.na(species), species != "") |>
+  dplyr::group_by(eventID, species) |>
+  dplyr::summarise(veces = dplyr::n(), .groups = "drop")
+
+tasa_unica <- mean(repeticion$veces == 1)
+
+ggplot(repeticion, aes(x = factor(pmin(veces, 5)))) +
+  geom_bar(fill = AZUL[3], width = 0.6) +
+  geom_text(stat = "count", aes(label = mil(after_stat(count))),
+            vjust = -0.5, colour = TINTA, size = 3.6) +
+  scale_x_discrete(labels = function(v) ifelse(v == "5", "5 o más", v)) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = paste0("El ", pct(tasa_unica, 0),
+                   " de las especies aparece una sola vez en su conglomerado"),
+    subtitle = "Veces que una misma especie se repite dentro de un conglomerado",
+    x = "Repeticiones de la especie en el conglomerado", y = "Casos"
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.x = element_blank())
+```
+
+En un censo real, las especies abundantes aparecerían decenas de veces por parcela.
+Aquí `r pct(tasa_unica, 0)` aparece exactamente una vez. El patrón corresponde a un
+registro de composición florística: un individuo testigo por especie.
+
+## La numeración de árboles tiene huecos
+
+```{r evidencia-huecos}
+# El código de ocurrencia termina en un correlativo de árbol dentro de la parcela,
+# precedido por letras (p. ej. 30643AV015). Se exige esa letra para no confundir
+# un identificador puramente numérico con un correlativo.
+huecos <- arboles |>
+  dplyr::mutate(corr = suppressWarnings(as.integer(
+    ifelse(grepl("[A-Za-z][0-9]+$", occurrenceID),
+           sub("^.*[A-Za-z]([0-9]+)$", "\\1", occurrenceID),
+           NA_character_)))) |>
+  dplyr::filter(!is.na(corr), corr > 0, corr <= 2000) |>
+  dplyr::group_by(eventID) |>
+  dplyr::summarise(registrados = dplyr::n(), maximo = max(corr), .groups = "drop") |>
+  dplyr::filter(maximo >= registrados)
+
+cobertura <- huecos$registrados / huecos$maximo
+
+ggplot(huecos, aes(x = maximo, y = registrados)) +
+  geom_abline(slope = 1, intercept = 0, colour = ALERTA, linetype = "22", linewidth = 0.5) +
+  geom_point(colour = AZUL[3], size = 1.8, alpha = 0.65) +
+  annotate("text", x = max(huecos$maximo) * 0.55, y = max(huecos$maximo) * 0.92,
+           label = "Si fuera censo, los puntos\ncaerían sobre esta línea",
+           colour = ALERTA, size = 3.4, hjust = 0, lineheight = 1.1) +
+  labs(
+    title = paste0("Solo se publica el ", pct(median(cobertura), 0),
+                   " de los árboles numerados en campo"),
+    subtitle = "Árboles registrados frente al correlativo más alto de cada conglomerado",
+    x = "Correlativo de árbol más alto en el conglomerado",
+    y = "Árboles efectivamente publicados"
+  ) +
+  tema_viz()
+```
+
+El correlativo de campo llega a números muy superiores a la cantidad de árboles
+publicados. Los árboles intermedios se midieron pero no están en esta publicación.
+
+> **Conclusión de la sección.** Con este dato no es posible estimar volumen por
+> hectárea. Lo que sigue caracteriza los árboles que sí están registrados, y esa
+> distinción se mantiene explícita en cada cifra.
+
+---
+
+# Volumen comercial de los árboles registrados
+
+El volumen del fuste aprovechable de cada árbol se calcula como un cilindro
+corregido por su forma real:
+
+$$V = \frac{\pi}{4} \left(\frac{DAP}{100}\right)^{2} \times H_{c} \times f$$
+
+donde $DAP$ es el diámetro a la altura del pecho en centímetros, $H_{c}$ la altura
+comercial en metros y $f$ el coeficiente mórfico, fijado en `r num(FACTOR_FORMA, 2)`.
+Ese coeficiente es un supuesto: el volumen escala linealmente con él, de modo que
+ajustarlo a `r num(FACTOR_FORMA + 0.05, 2)` elevaría todas las cifras en
+`r pct(0.05 / FACTOR_FORMA, 0)`.
+
+```{r volumen}
+arboles <- arboles |>
+  dplyr::mutate(
+    volumen = ifelse(!is.na(dap) & !is.na(h_comercial) & dap > 0 & h_comercial > 0,
+                     (pi / 4) * (dap / 100)^2 * h_comercial * FACTOR_FORMA,
+                     NA_real_),
+    sobre_dmc = !is.na(dap) & dap >= DMC
+  )
+
+med <- arboles |> dplyr::filter(!is.na(volumen))
+
+knitr::kable(
+  data.frame(
+    Indicador = c("Árboles con volumen calculable",
+                  "DAP mediano",
+                  "Altura comercial mediana",
+                  "Volumen mediano por árbol",
+                  "Volumen medio por árbol",
+                  paste0("Árboles sobre el DMC de ", DMC, " cm"),
+                  "Volumen acumulado de los registrados"),
+    Valor = c(mil(nrow(med)),
+              paste(num(median(med$dap), 1), "cm"),
+              paste(num(median(med$h_comercial), 1), "m"),
+              paste(num(median(med$volumen), 3), "m³"),
+              paste(num(mean(med$volumen), 3), "m³"),
+              paste0(mil(sum(arboles$sobre_dmc)), " (",
+                     pct(mean(arboles$sobre_dmc[!is.na(arboles$dap)]), 1), ")"),
+              paste(num(sum(med$volumen), 1), "m³"))
+  ),
+  caption = "Dasometría de los árboles registrados", align = c("l", "r")
+)
+```
+
+```{r dist-dap, fig.height=5}
+clases <- arboles |>
+  dplyr::filter(!is.na(dap)) |>
+  dplyr::mutate(clase_dap = cut(dap,
+                 breaks = c(0, 20, 30, 40, 50, 60, 80, Inf),
+                 labels = c("10–20", "20–30", "30–40", "40–50", "50–60", "60–80", "80+"),
+                 right = FALSE)) |>
+  dplyr::count(clase_dap, name = "arboles") |>
+  dplyr::mutate(aprovechable = as.integer(sub("([0-9]+).*", "\\1", clase_dap)) >= DMC)
+
+ggplot(clases, aes(x = clase_dap, y = arboles)) +
+  geom_col(aes(fill = aprovechable), width = 0.68) +
+  geom_text(aes(label = mil(arboles)), vjust = -0.5, colour = TINTA, size = 3.5) +
+  scale_fill_manual(values = c(`FALSE` = AZUL[1], `TRUE` = AZUL[5]),
+                    labels = c(`FALSE` = paste0("Bajo el DMC (", DMC, " cm)"),
+                               `TRUE`  = "Sobre el DMC"),
+                    name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+  labs(
+    title = "La mayoría de los árboles registrados no alcanza tamaño aprovechable",
+    subtitle = paste0("Distribución diamétrica. El diámetro mínimo de corta se fijó en ",
+                      DMC, " cm."),
+    x = "Clase diamétrica (cm)", y = "Árboles"
+  ) +
+  tema_viz() +
+  theme(legend.position = "top", panel.grid.major.x = element_blank())
+```
+
+## Qué especies rinden más madera por árbol
+
+```{r especies-volumen, fig.height=6.4}
+top_esp <- med |>
+  dplyr::filter(!is.na(species), species != "") |>
+  dplyr::group_by(species) |>
+  dplyr::summarise(n = dplyr::n(),
+                   vol_medio = mean(volumen),
+                   dap_medio = mean(dap), .groups = "drop") |>
+  dplyr::filter(n >= 5) |>
+  dplyr::arrange(dplyr::desc(vol_medio)) |>
+  head(18)
+
+ggplot(top_esp, aes(x = vol_medio, y = reorder(species, vol_medio))) +
+  geom_col(fill = AZUL[3], width = 0.68) +
+  geom_text(aes(label = paste0(num(vol_medio, 2), " m³   (n=", n, ")")),
+            hjust = -0.08, colour = TINTA_2, size = 3.2) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.30))) +
+  labs(
+    title = "Especies con mayor volumen comercial por árbol",
+    subtitle = "Media por individuo, entre especies con al menos 5 árboles medidos",
+    x = "Volumen comercial medio por árbol (m³)", y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank(),
+        axis.text.y = element_text(face = "italic"))
+```
+
+```{r tabla-especies}
+top_esp |>
+  dplyr::transmute(Especie = species, `Árboles medidos` = n,
+                   `DAP medio (cm)` = num(dap_medio, 1),
+                   `Volumen medio (m³)` = num(vol_medio, 3)) |>
+  knitr::kable(caption = "Especies ordenadas por volumen comercial por árbol",
+               align = c("l", "r", "r", "r"))
+```
+
+Esta tabla sí es operativa: indica qué especies justifican el esfuerzo de extracción
+por el volumen que rinde cada pie. Lo que **no** indica es cuántos de esos árboles
+hay por hectárea, que es el otro factor de la ecuación y el que falta en el dato
+público.
+
+---
+
+# Tipos de bosque
+
+```{r tipos}
+tipo_de <- function(h) {
+  h2 <- tolower(iconv(h, to = "ASCII//TRANSLIT"))
+  dplyr::case_when(
+    is.na(h2) | h2 == ""                       ~ NA_character_,
+    grepl("sin interven|maduro|primario", h2)  ~ "Maduro sin intervenir",
+    grepl("interven", h2)                      ~ "Intervenido",
+    grepl("secundario", h2)                    ~ "Secundario",
+    grepl("plantac", h2)                       ~ "Plantación",
+    TRUE                                       ~ "Otro"
+  )
+}
+
+arboles <- arboles |> dplyr::mutate(tipo = tipo_de(habitat))
+
+resumen_tipo <- arboles |>
+  dplyr::filter(!is.na(tipo)) |>
+  dplyr::group_by(tipo) |>
+  dplyr::summarise(
+    arboles     = dplyr::n(),
+    conglomerados = dplyr::n_distinct(eventID),
+    dap_medio   = mean(dap, na.rm = TRUE),
+    vol_medio   = mean(volumen, na.rm = TRUE),
+    sobre_dmc   = mean(sobre_dmc, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(arboles))
+
+resumen_tipo |>
+  dplyr::transmute(
+    `Tipo de bosque` = tipo, Árboles = mil(arboles),
+    Conglomerados = mil(conglomerados),
+    `DAP medio (cm)` = num(dap_medio, 1),
+    `Volumen medio (m³)` = num(vol_medio, 3),
+    `% sobre DMC` = pct(sobre_dmc, 1)
+  ) |>
+  knitr::kable(caption = "Estructura del arbolado por tipo de bosque",
+               align = c("l", "r", "r", "r", "r", "r"))
+```
+
+```{r vol-por-tipo, fig.height=4.6}
+comp_tipo <- arboles |>
+  dplyr::filter(!is.na(tipo), !is.na(volumen))
+
+ggplot(comp_tipo, aes(x = volumen, y = reorder(tipo, volumen, FUN = median))) +
+  geom_boxplot(aes(fill = tipo), width = 0.55, outlier.size = 0.7,
+               outlier.colour = APAGADO, colour = TINTA_2, linewidth = 0.4) +
+  scale_fill_manual(values = setNames(PAL_CAT[seq_len(dplyr::n_distinct(comp_tipo$tipo))],
+                                      unique(comp_tipo$tipo)), guide = "none") +
+  scale_x_log10() +
+  labs(
+    title = "El bosque maduro concentra los árboles de mayor volumen",
+    subtitle = "Volumen comercial por árbol según tipo de bosque (escala logarítmica)",
+    x = "Volumen comercial por árbol (m³)", y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+---
+
+# Mapas
+
+```{r sf-puntos}
+puntos_sf <- sf::st_as_sf(arboles, coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+
+sitios_sf <- arboles |>
+  dplyr::group_by(sitio, eventID) |>
+  dplyr::summarise(
+    lat = dplyr::first(lat), lon = dplyr::first(lon),
+    tipo = dplyr::first(tipo[!is.na(tipo)]),
+    arboles = dplyr::n(),
+    vol_total = sum(volumen, na.rm = TRUE),
+    vol_medio = mean(volumen, na.rm = TRUE),
+    n_dmc = sum(sobre_dmc, na.rm = TRUE),
+    dap_max = suppressWarnings(max(dap, na.rm = TRUE)),
+    .groups = "drop"
+  ) |>
+  dplyr::mutate(dap_max = ifelse(is.finite(dap_max), dap_max, NA_real_)) |>
+  sf::st_as_sf(coords = c("lon", "lat"), crs = 4326, remove = FALSE)
+```
+
+## Tipo de bosque
+
+```{r mapa-tipo, fig.height=7.5}
+mapa_tipo <- sitios_sf |> dplyr::filter(!is.na(tipo))
+
+ggplot(mapa_tipo) +
+  geom_sf(aes(colour = tipo), size = 2.1, alpha = 0.85) +
+  scale_colour_manual(values = setNames(PAL_CAT[seq_len(dplyr::n_distinct(mapa_tipo$tipo))],
+                                        sort(unique(mapa_tipo$tipo))), name = NULL) +
+  labs(
+    title = "Tipo de bosque por conglomerado",
+    subtitle = "Clasificación de campo del inventario nacional",
+    caption = "Cada punto es un conglomerado del inventario forestal nacional.",
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "top",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+## Árboles de tamaño aprovechable
+
+```{r mapa-dmc, fig.height=7.5}
+ggplot(sitios_sf) +
+  geom_sf(data = sitios_sf[sitios_sf$n_dmc == 0, ],
+          colour = REJILLA, size = 1.4) +
+  geom_sf(data = sitios_sf[sitios_sf$n_dmc > 0, ],
+          aes(size = n_dmc, colour = n_dmc), alpha = 0.85) +
+  scale_colour_gradientn(colours = AZUL[2:6], name = paste0("Árboles ≥ ", DMC, " cm")) +
+  scale_size_continuous(range = c(1.8, 6), guide = "none") +
+  labs(
+    title = paste0("Dónde se registraron árboles sobre el diámetro mínimo de corta"),
+    subtitle = paste0("Conglomerados con al menos un árbol de DAP ≥ ", DMC,
+                      " cm. En gris, los que no tienen ninguno."),
+    caption = "El tamaño del símbolo acompaña al color; ambos codifican la misma cantidad.",
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "top",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+## Diámetro máximo alcanzado
+
+```{r mapa-dap, fig.height=7.5}
+ggplot(sitios_sf[!is.na(sitios_sf$dap_max), ]) +
+  geom_sf(aes(colour = dap_max), size = 2.1, alpha = 0.88) +
+  scale_colour_gradientn(colours = AZUL[1:6], name = "DAP máximo (cm)") +
+  labs(
+    title = "Diámetro del árbol mayor registrado en cada conglomerado",
+    subtitle = "Indicador indirecto de madurez del rodal y de disponibilidad de fustes gruesos",
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "top",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+---
+
+# Cuánta madera hay por región
+
+Las cifras de esta sección son **volumen acumulado de los árboles efectivamente
+registrados**, no el volumen en pie de cada provincia. Por lo visto en la sección 2,
+lo publicado es una fracción pequeña del arbolado real, de modo que estos totales son
+un piso, no una estimación del recurso.
+
+```{r limites-region}
+# Se intenta el límite provincial real; si no se puede descargar, se cae a la
+# malla de celdas satelitales, que ya está en memoria.
+provincias_gadm <- function() {
+  if (!requireNamespace("geodata", quietly = TRUE)) {
+    try(install.packages("geodata", quiet = TRUE), silent = TRUE)
+  }
+  if (!requireNamespace("geodata", quietly = TRUE)) return(NULL)
+
+  v <- try(geodata::gadm(country = "ECU", level = 1, path = CACHE_DIR), silent = TRUE)
+  if (inherits(v, "try-error") || is.null(v)) return(NULL)
+
+  s <- sf::st_as_sf(v)
+  col <- intersect(c("NAME_1", "VARNAME_1"), names(s))
+  if (length(col) == 0) return(NULL)
+
+  s <- s[, col[1]]
+  names(s)[1] <- "region"
+  s
+}
+
+# Respaldo autónomo: una retícula de 1° sobre el área de estudio, rotulada por
+# la coordenada de su centro. Solo se usa si el límite provincial no se descarga.
+reticula <- function(puntos, paso = 1) {
+  g <- sf::st_make_grid(sf::st_as_sfc(sf::st_bbox(puntos)), cellsize = paso)
+  ctr <- sf::st_coordinates(sf::st_centroid(g))
+  etiqueta <- paste0(num(abs(ctr[, 2]), 1), "°", ifelse(ctr[, 2] < 0, "S", "N"), " ",
+                     num(abs(ctr[, 1]), 1), "°", ifelse(ctr[, 1] < 0, "O", "E"))
+  sf::st_sf(region = etiqueta, geometry = g)
+}
+
+# No se cachea el fallo: si la descarga no sale hoy, se reintenta la próxima vez
+ruta_prov <- file.path(CACHE_DIR, "provincias_ecu.rds")
+prov <- if (file.exists(ruta_prov)) {
+  readRDS(ruta_prov)
+} else {
+  p <- provincias_gadm()
+  if (!is.null(p)) saveRDS(p, ruta_prov)
+  p
+}
+
+regiones <- if (!is.null(prov)) {
+  list(sf = prov, fuente = "Provincias del Ecuador (GADM)")
+} else {
+  list(sf = reticula(puntos_sf),
+       fuente = "Retícula de 1° (no se pudo descargar el límite provincial)")
+}
+
+puntos_reg <- sf::st_join(puntos_sf, regiones$sf, join = sf::st_within)
+
+resumen_region <- puntos_reg |>
+  sf::st_drop_geometry() |>
+  dplyr::filter(!is.na(region)) |>
+  dplyr::group_by(region) |>
+  dplyr::summarise(
+    conglomerados = dplyr::n_distinct(eventID),
+    arboles   = dplyr::n(),
+    volumen   = sum(volumen, na.rm = TRUE),
+    sobre_dmc = sum(sobre_dmc, na.rm = TRUE),
+    dap_medio = mean(dap, na.rm = TRUE),
+    especies  = dplyr::n_distinct(species[!is.na(species) & species != ""]),
+    .groups = "drop"
+  ) |>
+  dplyr::arrange(dplyr::desc(volumen))
+```
+
+```{r tabla-region}
+resumen_region |>
+  dplyr::transmute(
+    Región = region,
+    Conglomerados = mil(conglomerados),
+    `Árboles registrados` = mil(arboles),
+    `Volumen acumulado (m³)` = num(volumen, 1),
+    `Árboles ≥ DMC` = mil(sobre_dmc),
+    `DAP medio (cm)` = num(dap_medio, 1),
+    Especies = mil(especies)
+  ) |>
+  knitr::kable(
+    caption = paste0("Madera registrada por región — ", regiones$fuente),
+    align = c("l", rep("r", 6))
+  )
+```
+
+```{r mapa-volumen-region, fig.height=8}
+mapa_reg <- regiones$sf |>
+  dplyr::left_join(resumen_region, by = "region")
+
+con_dato <- mapa_reg |> dplyr::filter(!is.na(arboles))
+
+# Se rotulan solo las regiones de mayor volumen para que el mapa siga legible
+top_rot <- con_dato |>
+  dplyr::arrange(dplyr::desc(volumen)) |>
+  head(8)
+top_rot$punto <- sf::st_point_on_surface(sf::st_geometry(top_rot))
+
+ggplot() +
+  geom_sf(data = mapa_reg, fill = "#f0efec", colour = EJE, linewidth = 0.25) +
+  geom_sf(data = con_dato, aes(fill = volumen), colour = EJE, linewidth = 0.25) +
+  geom_sf_label(
+    data = sf::st_set_geometry(top_rot, top_rot$punto),
+    aes(label = paste0(region, "\n", mil(arboles), " árboles\n", num(volumen, 0), " m³")),
+    size = 2.7, lineheight = 0.95, label.size = 0, fill = alpha(LIENZO, 0.82),
+    colour = TINTA
+  ) +
+  scale_fill_gradientn(colours = AZUL[1:6], name = "Volumen (m³)") +
+  labs(
+    title = "Volumen comercial registrado por región",
+    subtitle = paste0("Suma del volumen de los ", mil(sum(resumen_region$arboles)),
+                      " árboles inventariados. En gris, regiones sin registros."),
+    caption = paste0(regiones$fuente,
+                     ". Es volumen de los árboles registrados, no el volumen en pie de la región."),
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "right",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+```{r mapa-arboles-region, fig.height=8}
+ggplot() +
+  geom_sf(data = mapa_reg, fill = "#f0efec", colour = EJE, linewidth = 0.25) +
+  geom_sf(data = con_dato, aes(fill = arboles), colour = EJE, linewidth = 0.25) +
+  geom_sf(data = sitios_sf, colour = TINTA, size = 0.5, alpha = 0.55) +
+  scale_fill_gradientn(colours = AZUL[1:6], name = "Árboles") +
+  labs(
+    title = "Árboles registrados por región",
+    subtitle = "Los puntos marcan la ubicación de cada conglomerado del inventario",
+    caption = regiones$fuente,
+    x = NULL, y = NULL
+  ) +
+  tema_viz() +
+  theme(legend.position = "right",
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+```{r barras-region, fig.height=6}
+barras <- resumen_region |> head(12)
+
+ggplot(barras, aes(x = volumen, y = reorder(region, volumen))) +
+  geom_col(fill = AZUL[3], width = 0.68) +
+  geom_text(aes(label = paste0(num(volumen, 1), " m³  ·  ", mil(arboles), " árboles")),
+            hjust = -0.06, colour = TINTA_2, size = 3.2) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.38))) +
+  labs(
+    title = "Regiones ordenadas por volumen registrado",
+    subtitle = "Volumen comercial acumulado de los árboles del inventario",
+    x = "Volumen acumulado (m³)", y = NULL
+  ) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank())
+```
+
+```{r lectura-region, results='asis'}
+lider <- resumen_region[1, ]
+cat("La región con más volumen registrado es **", lider$region, "**, con ",
+    mil(lider$arboles), " árboles inventariados que suman ", num(lider$volumen, 1),
+    " m³ en ", mil(lider$conglomerados), " conglomerados. ",
+    "Conviene leer esa cifra junto al esfuerzo de muestreo: más conglomerados ",
+    "implican más árboles registrados, de modo que el mapa refleja tanto la riqueza ",
+    "del bosque como dónde se midió más.\n", sep = "")
+```
+
+Para convertir estos totales en volumen en pie por región haría falta el factor de
+expansión del muestreo —cuántas hectáreas representa cada conglomerado dentro de su
+estrato— que forma parte del diseño de la Evaluación Nacional Forestal y no viene en
+la publicación abierta.
+
+---
+
+# El satélite
+
+Conviene ser explícito sobre el papel de cada fuente, porque es la confusión más
+común en teledetección aplicada.
+
+Un satélite óptico mide luz reflejada. En esa señal no hay ninguna magnitud que
+equivalga a metros cúbicos: para traducirla hace falta un conjunto de lugares donde
+se conozcan a la vez la reflectancia y la medición de campo. Las parcelas del
+inventario cumplen esa función de calibración. El satélite no las reemplaza; ellas
+son lo que vuelve interpretable al satélite.
+
+Una vez calibrado, el modelo se aplica a píxeles donde no hay parcela, y ahí está la
+ganancia: extender a un territorio completo lo que se midió en unos pocos puntos.
+
+Las imágenes que siguen son Sentinel-2, del mismo periodo en que se levantó el
+inventario de campo.
+
+```{r stac-utilidades, include=FALSE}
+celda_mgrs <- function(props) {
+  if (!is.null(props[["grid:code"]])) return(sub("^MGRS-", "", props[["grid:code"]]))
+  if (!is.null(props[["s2:mgrs_tile"]])) return(props[["s2:mgrs_tile"]])
+  if (!is.null(props[["mgrs:utm_zone"]])) {
+    return(paste0(sprintf("%02d", props[["mgrs:utm_zone"]]),
+                  props[["mgrs:latitude_band"]], props[["mgrs:grid_square"]]))
+  }
+  NA_character_
+}
+
+con_reintento <- function(expr, intentos = 4, espera = 3) {
+  llamada <- substitute(expr); entorno <- parent.frame()
+  for (k in seq_len(intentos)) {
+    r <- try(eval(llamada, entorno), silent = TRUE)
+    if (!inherits(r, "try-error")) return(r)
+    if (k == intentos) stop("La consulta STAC falló tras ", intentos, " intentos:\n",
+                            as.character(r))
+    message("  reintento ", k, " en ", espera * k, "s"); Sys.sleep(espera * k)
+  }
+}
+
+href_de <- function(feature, activo) {
+  a <- feature$assets[[activo]]
+  if (is.null(a)) return(NA_character_)
+  h <- a$href
+  if (is.character(h) && length(h) == 1 && grepl("^https?://", h)) return(h)
+  alt <- a[["alternate"]]
+  if (is.list(alt)) for (nm in names(alt)) {
+    hh <- alt[[nm]]$href
+    if (is.character(hh) && length(hh) == 1 && grepl("^https?://", hh)) return(hh)
+  }
+  NA_character_
+}
+
+escena_utilizable <- function(feature) {
+  all(vapply(c(BANDAS, "scl"), function(b) !is.na(href_de(feature, b)), logical(1)))
+}
+
+tabla_meta <- function(features) {
+  m <- do.call(rbind, lapply(features, function(f) data.frame(
+    id = f$id, fecha = as.Date(substr(f$properties$datetime, 1, 10)),
+    nubes = as.numeric(f$properties[["eo:cloud_cover"]]),
+    celda = celda_mgrs(f$properties),
+    epsg = as.integer(f$properties[["proj:epsg"]]),
+    offset_aplicado = isTRUE(f$properties[["earthsearch:boa_offset_applied"]]),
+    stringsAsFactors = FALSE)))
+  m[!is.na(m$celda), ]
+}
+```
+
+```{r stac-recon, include=FALSE}
+bb <- as.numeric(sf::st_bbox(puntos_sf))
+RECON_FIN <- as.character(as.Date(FECHA_INI) + 20)
+
+recon <- en_cache(paste0("recon_", paste(round(bb, 2), collapse = "_")),
+  con_reintento(
+    rstac::stac(STAC_URL) |>
+      rstac::stac_search(collections = COLECCION, bbox = bb,
+        datetime = paste0(FECHA_INI, "T00:00:00Z/", RECON_FIN, "T23:59:59Z"),
+        limit = 400) |>
+      rstac::post_request()))
+
+huellas <- lapply(recon$features, function(f) {
+  bx <- f$bbox
+  sf::st_as_sfc(sf::st_bbox(c(xmin = bx[1], ymin = bx[2], xmax = bx[3], ymax = bx[4]),
+                            crs = 4326))
+})
+huellas_sf <- sf::st_sf(celda = sapply(recon$features, function(f) celda_mgrs(f$properties)),
+                        geometry = do.call(c, huellas))
+huellas_sf <- huellas_sf[!is.na(huellas_sf$celda), ]
+huellas_sf <- huellas_sf[!duplicated(huellas_sf$celda), ]
+
+interseccion <- sf::st_join(puntos_sf, huellas_sf, join = sf::st_within)
+
+prioridad <- interseccion |> sf::st_drop_geometry() |>
+  dplyr::filter(!is.na(celda)) |> dplyr::count(celda, sort = TRUE) |>
+  dplyr::mutate(rango = dplyr::row_number()) |> dplyr::select(celda, rango)
+
+interseccion <- interseccion |> dplyr::filter(!is.na(celda)) |>
+  dplyr::left_join(prioridad, by = "celda") |>
+  dplyr::group_by(key) |> dplyr::slice_min(rango, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+conteo_celda <- interseccion |> sf::st_drop_geometry() |> dplyr::count(celda, sort = TRUE)
+CELDAS <- head(conteo_celda$celda, N_CELDAS)
+```
+
+```{r stac-celdas, include=FALSE}
+buscar_ventana <- function(bb_c, ini, fin, con_filtro = TRUE) {
+  q <- rstac::stac(STAC_URL) |>
+    rstac::stac_search(collections = COLECCION, bbox = bb_c,
+      datetime = paste0(ini, "T00:00:00Z/", fin, "T23:59:59Z"), limit = 50)
+  if (con_filtro) q <- rstac::ext_query(q, `eo:cloud_cover` < NUBE_MAX)
+  rstac::post_request(q)
+}
+
+consultar <- function(bb_c, ini, fin) {
+  r <- try(con_reintento(buscar_ventana(bb_c, ini, fin, TRUE), 3, 4), silent = TRUE)
+  if (inherits(r, "try-error")) {
+    message("  filtro en servidor rechazado; se repite sin él")
+    r <- con_reintento(buscar_ventana(bb_c, ini, fin, FALSE), 3, 4)
+  }
+  Sys.sleep(1); r
+}
+
+escenas_de_celda <- function(cc) {
+  bb_c <- as.numeric(sf::st_bbox(huellas_sf[huellas_sf$celda == cc, ]))
+  cortes <- seq(as.Date(FECHA_INI), as.Date(FECHA_FIN), length.out = N_ESCENAS + 1)
+  piezas <- lapply(seq_len(N_ESCENAS), function(k) {
+    ini <- as.character(cortes[k]); fin <- as.character(cortes[k + 1] - 1)
+    res <- en_cache(paste0("stac_", cc, "_v", k, "_", gsub("-", "", ini)),
+                    consultar(bb_c, ini, fin))
+    if (rstac::items_length(res) == 0) return(NULL)
+    ids <- sapply(res$features, `[[`, "id")
+    m <- tabla_meta(res$features)
+    m <- m[m$celda == cc & m$nubes <= NUBE_MAX, ]
+    if (nrow(m) == 0) return(NULL)
+    sirve <- vapply(m$id, function(i) escena_utilizable(res$features[[match(i, ids)]]),
+                    logical(1))
+    m <- m[sirve, , drop = FALSE]
+    if (nrow(m) == 0) return(NULL)
+    mejor <- m[which.min(m$nubes), ]
+    list(meta = mejor, feature = res$features[[match(mejor$id, ids)]])
+  })
+  piezas <- piezas[!vapply(piezas, is.null, logical(1))]
+  if (length(piezas) == 0) return(NULL)
+  piezas <- piezas[order(sapply(piezas, function(p) p$meta$fecha))]
+  list(escenas = do.call(rbind, lapply(piezas, `[[`, "meta")),
+       features = lapply(piezas, `[[`, "feature"))
+}
+
+catalogo_celdas <- setNames(lapply(CELDAS, function(cc) {
+  message("Consultando celda ", cc); escenas_de_celda(cc)
+}), CELDAS)
+catalogo_celdas <- catalogo_celdas[!vapply(catalogo_celdas, is.null, logical(1))]
+if (length(catalogo_celdas) == 0) stop("Ninguna celda devolvió escenas utilizables.")
+```
+
+```{r extraccion, include=FALSE}
+extraer_escena <- function(feature, fila_meta, pts_proj, vect_pts) {
+  valores <- list()
+  for (bd in BANDAS) {
+    h <- href_de(feature, bd)
+    if (is.na(h)) { valores[[bd]] <- rep(NA_real_, nrow(pts_proj)); next }
+    valores[[bd]] <- as.numeric(terra::extract(
+      terra::rast(paste0("/vsicurl/", h)), vect_pts, ID = FALSE)[[1]])
+  }
+  h_scl <- href_de(feature, "scl")
+  valores[["scl"]] <- if (!is.na(h_scl)) as.numeric(terra::extract(
+    terra::rast(paste0("/vsicurl/", h_scl)), vect_pts, ID = FALSE)[[1]])
+    else rep(NA_real_, nrow(pts_proj))
+
+  df <- as.data.frame(valores)
+  df$sitio <- pts_proj$sitio; df$key <- pts_proj$key
+  df$celda <- fila_meta$celda; df$fecha <- fila_meta$fecha
+
+  desplazamiento <- if (isTRUE(fila_meta$offset_aplicado)) 0 else -1000
+  if (fila_meta$fecha >= as.Date("2022-01-25") && !isTRUE(fila_meta$offset_aplicado)) {
+    for (bd in BANDAS) df[[bd]] <- (df[[bd]] + desplazamiento) / 10000
+  } else {
+    for (bd in BANDAS) df[[bd]] <- df[[bd]] / 10000
+  }
+  df
+}
+
+procesar_celda <- function(cc) {
+  info <- catalogo_celdas[[cc]]; escenas <- info$escenas
+  pts_c <- interseccion |> dplyr::filter(celda == cc)
+  if (nrow(pts_c) == 0) return(NULL)
+  pts_proj <- sf::st_transform(pts_c, escenas$epsg[1])
+  vect_pts <- terra::vect(pts_proj)
+  sello <- paste0(cc, "_", nrow(pts_proj), "pts")
+  do.call(rbind, lapply(seq_len(nrow(escenas)), function(i) {
+    d <- en_cache(paste0("refl_", sello, "_", escenas$id[i]),
+                  extraer_escena(info$features[[i]], escenas[i, ], pts_proj, vect_pts),
+                  columnas = c(BANDAS, "scl", "sitio", "key", "celda", "fecha"))
+    d$key   <- clave_txt(d$key)
+    d$sitio <- as.character(d$sitio)
+    d
+  }))
+}
+
+reflectancia <- do.call(rbind, lapply(names(catalogo_celdas), function(cc) {
+  message("Celda ", cc); procesar_celda(cc)
+}))
+
+SCL_MALOS <- c(0, 1, 3, 8, 9, 10, 11)
+limpio <- reflectancia |>
+  dplyr::filter(!scl %in% SCL_MALOS, !is.na(scl)) |>
+  dplyr::filter(dplyr::if_all(dplyr::all_of(BANDAS), ~ !is.na(.x) & .x > 0 & .x < 1.2)) |>
+  dplyr::mutate(
+    ndvi = (nir - red) / (nir + red),
+    ndwi = (green - nir) / (green + nir),
+    nbr  = (nir - swir22) / (nir + swir22),
+    ndmi = (nir - swir16) / (nir + swir16),
+    rsi  = swir16 / swir22
+  )
+
+VARIABLES <- c(BANDAS, "ndvi", "ndwi", "nbr", "ndmi", "rsi")
+
+rasgos <- limpio |>
+  dplyr::group_by(key, sitio, celda) |>
+  dplyr::summarise(n_obs = dplyr::n(),
+    dplyr::across(dplyr::all_of(VARIABLES),
+      list(med = ~ median(.x, na.rm = TRUE), sd = ~ stats::sd(.x, na.rm = TRUE),
+           amp = ~ diff(range(.x, na.rm = TRUE))), .names = "{.col}_{.fn}"),
+    .groups = "drop") |>
+  dplyr::filter(n_obs >= 3)
+```
+
+## Las imágenes
+
+```{r chips, fig.height=8}
+# Se ilustran los conglomerados de mayor volumen registrado, uno por tipo de bosque
+celda_de_sitio <- interseccion |>
+  sf::st_drop_geometry() |>
+  dplyr::select(sitio, celda) |>
+  dplyr::distinct(sitio, .keep_all = TRUE)   # una celda por sitio, sin duplicar filas
+
+candidatos <- sitios_sf |>
+  sf::st_drop_geometry() |>
+  dplyr::inner_join(celda_de_sitio, by = "sitio") |>
+  dplyr::filter(celda %in% names(catalogo_celdas), !is.na(tipo), vol_total > 0) |>
+  dplyr::group_by(tipo) |>
+  dplyr::arrange(dplyr::desc(vol_total), .by_group = TRUE) |>
+  dplyr::slice_head(n = 1) |>
+  dplyr::ungroup() |>
+  dplyr::arrange(dplyr::desc(vol_total)) |>
+  head(N_CHIPS)
+
+estirar <- function(v) {
+  q <- stats::quantile(v, c(0.02, 0.98), na.rm = TRUE)
+  if (!is.finite(q[1]) || !is.finite(q[2]) || q[2] <= q[1]) return(rep(0.5, length(v)))
+  pmin(pmax((v - q[1]) / (q[2] - q[1]), 0), 1)
+}
+
+chip_de <- function(fila) {
+  info <- catalogo_celdas[[fila$celda]]
+  if (is.null(info)) return(NULL)
+  i    <- which.min(info$escenas$nubes)
+  feat <- info$features[[i]]
+
+  p  <- sf::st_transform(
+          sf::st_sfc(sf::st_point(c(fila$lon, fila$lat)), crs = 4326),
+          info$escenas$epsg[i])
+  xy <- sf::st_coordinates(p)
+  e  <- terra::ext(xy[1] - LADO_CHIP/2, xy[1] + LADO_CHIP/2,
+                   xy[2] - LADO_CHIP/2, xy[2] + LADO_CHIP/2)
+
+  capas <- lapply(c("red", "green", "blue"), function(b) {
+    h <- href_de(feat, b)
+    if (is.na(h)) return(NULL)
+    terra::crop(terra::rast(paste0("/vsicurl/", h)), e)
+  })
+  if (any(vapply(capas, is.null, logical(1)))) return(NULL)
+
+  s <- do.call(c, capas)
+  names(s) <- c("red", "green", "blue")
+  d <- as.data.frame(s, xy = TRUE, na.rm = TRUE)
+  # Un NA en cualquier banda propagaría a rgb() y abortaría el recorte
+  d <- d[is.finite(d$red) & is.finite(d$green) & is.finite(d$blue), , drop = FALSE]
+  if (nrow(d) < 100) return(NULL)
+
+  d$xr <- (d$x - min(d$x)) / max(diff(range(d$x)), 1)
+  d$yr <- (d$y - min(d$y)) / max(diff(range(d$y)), 1)
+  d$col <- grDevices::rgb(estirar(d$red), estirar(d$green), estirar(d$blue))
+  d$etiqueta <- paste0(fila$tipo, "\n", format(info$escenas$fecha[i]),
+                       "  ·  ", num(fila$vol_total, 1), " m³ registrados")
+  d[, c("xr", "yr", "col", "etiqueta")]
+}
+
+chips <- do.call(rbind, lapply(seq_len(nrow(candidatos)), function(k) {
+  r <- try(chip_de(candidatos[k, ]), silent = TRUE)
+  if (inherits(r, "try-error")) NULL else r
+}))
+
+HAY_CHIPS <- !is.null(chips) && nrow(chips) > 0
+
+if (HAY_CHIPS) {
+  print(
+    ggplot(chips, aes(x = xr, y = yr, fill = col)) +
+      geom_raster() +
+      scale_fill_identity() +
+      facet_wrap(~ etiqueta, ncol = 2) +
+      coord_fixed(expand = FALSE) +
+      annotate("point", x = 0.5, y = 0.5, shape = 21, size = 4,
+               colour = "#ffffff", fill = NA, stroke = 1.1) +
+      labs(
+        title = "Los conglomerados vistos desde Sentinel-2",
+        subtitle = paste0("Color natural, recortes de ", LADO_CHIP / 1000,
+                          " km de lado. El círculo marca la parcela medida."),
+        caption = "Imágenes Sentinel-2 L2A, escena menos nubosa disponible en cada celda.",
+        x = NULL, y = NULL
+      ) +
+      tema_viz() +
+      theme(axis.text = element_blank(), panel.grid = element_blank(),
+            strip.text = element_text(size = 8, lineheight = 1.1))
+  )
+}
+```
+
+```{r sin-chips, eval=!HAY_CHIPS, results='asis'}
+cat("No se pudo componer ningún recorte de imagen con las escenas disponibles.\n")
+```
+
+```{r nota-chips, eval=HAY_CHIPS, results='asis'}
+cat("A simple vista la diferencia entre un dosel maduro y uno intervenido es de ",
+    "textura, no de color: el primero es rugoso y heterogéneo, el segundo más liso ",
+    "y con claros. Esa es exactamente la propiedad que el clasificador aprovecha, y ",
+    "la razón de que distinguir tipo de bosque funcione mientras identificar especies ",
+    "no.\n", sep = "")
+```
+
+## Estimar el grosor del arbolado
+
+Con las parcelas como calibración se puede intentar lo que el satélite no hace solo:
+predecir una propiedad del bosque a partir de la reflectancia.
+
+El objetivo es el **DAP medio del sitio**, no el volumen total. El volumen total
+depende de cuántos árboles se registraron en cada parcela, que es una decisión de
+muestreo y no una propiedad del bosque; el diámetro medio sí describe la estructura
+real del rodal.
+
+```{r regresion}
+pred_cols <- grep("_(med|sd|amp)$", names(rasgos), value = TRUE)
+
+feat_sitio <- rasgos |>
+  dplyr::group_by(sitio) |>
+  dplyr::summarise(dplyr::across(dplyr::all_of(pred_cols), ~ mean(.x, na.rm = TRUE)),
+                   .groups = "drop")
+
+obs_sitio <- arboles |>
+  dplyr::group_by(sitio) |>
+  dplyr::summarise(dap_medio = mean(dap, na.rm = TRUE),
+                   n_arb = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n_arb >= 5, !is.na(dap_medio))
+
+reg_df <- dplyr::inner_join(feat_sitio, obs_sitio, by = "sitio")
+reg_df <- reg_df[stats::complete.cases(reg_df[, pred_cols]), ]
+
+HAY_REG <- nrow(reg_df) >= 30
+```
+
+```{r sin-regresion, eval=!HAY_REG, results='asis'}
+cat("Solo ", nrow(reg_df), " sitios reúnen datos satelitales y de campo suficientes; ",
+    "se necesitan al menos 30 para una regresión con validación separada.\n", sep = "")
+```
+
+```{r ajuste-regresion, eval=HAY_REG}
+idx_tr <- sample(seq_len(nrow(reg_df)), floor(PROP_TRAIN * nrow(reg_df)))
+tr <- reg_df[idx_tr, ]; te <- reg_df[-idx_tr, ]
+
+rf_reg <- ranger::ranger(
+  as.formula(paste("dap_medio ~", paste(pred_cols, collapse = " + "))),
+  data = tr, num.trees = N_ARBOLES, seed = 2026)
+
+yhat <- predict(rf_reg, data = te)$predictions
+rmse <- sqrt(mean((te$dap_medio - yhat)^2))
+rmse_base <- sqrt(mean((te$dap_medio - mean(tr$dap_medio))^2))
+r2 <- 1 - sum((te$dap_medio - yhat)^2) / sum((te$dap_medio - mean(tr$dap_medio))^2)
+
+knitr::kable(
+  data.frame(
+    Medida = c("Sitios de entrenamiento", "Sitios de prueba",
+               "RMSE del modelo (cm)", "RMSE prediciendo la media (cm)",
+               "R² fuera de muestra"),
+    Valor = c(mil(nrow(tr)), mil(nrow(te)), num(rmse, 2), num(rmse_base, 2), num(r2, 3))
+  ),
+  caption = "Predicción del DAP medio del sitio a partir de la reflectancia",
+  align = c("l", "r"))
+```
+
+```{r disp-regresion, eval=HAY_REG, fig.height=5}
+dd <- data.frame(observado = te$dap_medio, predicho = yhat)
+lim <- range(c(dd$observado, dd$predicho))
+
+ggplot(dd, aes(x = observado, y = predicho)) +
+  geom_abline(slope = 1, intercept = 0, colour = EJE, linetype = "22") +
+  geom_point(colour = AZUL[3], size = 2.2, alpha = 0.75) +
+  coord_fixed(xlim = lim, ylim = lim) +
+  labs(
+    title = if (r2 > 0.1) "El satélite explica parte del grosor del arbolado"
+            else "El satélite no explica el grosor del arbolado",
+    subtitle = paste0("DAP medio por sitio, en sitios no usados para entrenar. ",
+                      "R² = ", num(r2, 3)),
+    x = "DAP medio observado (cm)", y = "DAP medio predicho (cm)"
+  ) +
+  tema_viz()
+```
+
+```{r lectura-regresion, eval=HAY_REG, results='asis'}
+if (r2 > 0.1) {
+  cat("El modelo reduce el error respecto a predecir la media, con un R² de ",
+      num(r2, 3), ". Es señal aprovechable, aunque modesta: la reflectancia óptica ",
+      "se satura sobre dosel cerrado, de modo que distingue bien un rodal joven de ",
+      "uno maduro pero no afina entre dos maduros.\n", sep = "")
+} else {
+  cat("El R² es de ", num(r2, 3), ", es decir que el modelo no mejora a predecir ",
+      "simplemente la media. Con ", nrow(te), " sitios de prueba y un sensor óptico ",
+      "que se satura sobre dosel cerrado, este resultado es el esperable: para ",
+      "estructura del bosque el instrumento adecuado es el radar o el lidar, no el ",
+      "óptico.\n", sep = "")
+}
+```
+
+## Altura de dosel medida desde el espacio
+
+```{r altura-dosel, eval=USAR_ALTURA_DOSEL}
+alt <- try({
+  r <- terra::rast(paste0("/vsicurl/", URL_ALTURA))
+  v <- terra::extract(r, terra::vect(sitios_sf), ID = FALSE)[[1]]
+  data.frame(sitio = sitios_sf$sitio, altura = ifelse(v > 60, NA, v))
+}, silent = TRUE)
+
+if (!inherits(alt, "try-error")) {
+  comp <- sitios_sf |> sf::st_drop_geometry() |>
+    dplyr::inner_join(alt, by = "sitio") |>
+    dplyr::filter(!is.na(altura), !is.na(dap_max))
+
+  print(ggplot(comp, aes(x = altura, y = dap_max)) +
+    geom_point(colour = AZUL[3], size = 2, alpha = 0.7) +
+    geom_smooth(method = "lm", se = FALSE, colour = TINTA_2, linewidth = 0.6) +
+    labs(title = "Altura de dosel satelital frente al diámetro mayor medido",
+         subtitle = "Altura GLAD 2019 (30 m) contra el DAP máximo de cada conglomerado",
+         x = "Altura de dosel (m)", y = "DAP máximo medido (cm)") +
+    tema_viz())
+}
+```
+
+```{r nota-altura, eval=!USAR_ALTURA_DOSEL, results='asis'}
+cat("Esta sección está desactivada por defecto. El producto de altura de dosel ",
+    "GLAD (Potapov 2019, 30 m) es un archivo continental de varios gigabytes cuya ",
+    "lectura remota puede tardar mucho, de modo que se deja apagado para no ",
+    "arriesgar la primera compilación. Para activarlo, poner `USAR_ALTURA_DOSEL` ",
+    "en `TRUE` en los parámetros.\n\n",
+    "Esa capa es la vía verdaderamente satelital: altura medida por lidar espacial ",
+    "GEDI y extendida con Landsat, sin necesidad de parcelas propias. De la altura ",
+    "se llega a biomasa con alometrías publicadas, y de la biomasa a volumen ",
+    "comercial con densidad de madera y factores de expansión. Cada paso agrega ",
+    "supuestos, de modo que sirve a escala regional y no para decidir sobre un ",
+    "predio concreto.\n", sep = "")
+```
+
+## Clasificar el tipo de bosque
+
+Distinguir bosque maduro de intervenido es una diferencia estructural que el sensor
+capta, a diferencia de la identidad de una especie bajo dosel cerrado.
+
+```{r armar-modelo}
+modelo_df <- rasgos |>
+  dplyr::inner_join(dplyr::select(arboles, key, tipo), by = "key") |>
+  dplyr::filter(!is.na(tipo))
+
+frec_tipo <- modelo_df |> dplyr::count(tipo, sort = TRUE)
+
+clases_validas <- frec_tipo$tipo[frec_tipo$n >= MIN_POR_CLASE]
+modelo_df <- modelo_df |>
+  dplyr::filter(tipo %in% clases_validas) |>
+  dplyr::mutate(clase = factor(tipo))
+
+MODELAR <- nlevels(modelo_df$clase) >= 2 && dplyr::n_distinct(modelo_df$sitio) >= 10
+
+frec_tipo |>
+  dplyr::transmute(`Tipo de bosque` = tipo, `Registros con datos satelitales` = mil(n)) |>
+  knitr::kable(caption = "Soporte disponible por clase", align = c("l", "r"))
+```
+
+```{r sin-modelo, eval=!MODELAR, results='asis'}
+cat("No hay clases suficientes con el umbral de ", MIN_POR_CLASE,
+    " registros para entrenar un clasificador de tipo de bosque.\n", sep = "")
+```
+
+```{r particion, eval=MODELAR}
+sitios <- unique(modelo_df$sitio)
+sitios_train <- sample(sitios, size = floor(PROP_TRAIN * length(sitios)))
+
+entrenamiento <- modelo_df |> dplyr::filter(sitio %in% sitios_train) |>
+  dplyr::mutate(clase = droplevels(clase))
+prueba <- modelo_df |> dplyr::filter(!sitio %in% sitios_train) |>
+  dplyr::filter(clase %in% levels(entrenamiento$clase)) |>
+  dplyr::mutate(clase = factor(clase, levels = levels(entrenamiento$clase)))
+
+knitr::kable(
+  data.frame(Conjunto = c("Entrenamiento", "Prueba"),
+             Registros = c(nrow(entrenamiento), nrow(prueba)),
+             Sitios = c(length(sitios_train), dplyr::n_distinct(prueba$sitio))),
+  caption = "Partición por sitio de muestreo, no por árbol", align = c("l", "r", "r"))
+```
+
+```{r ajuste, eval=MODELAR}
+predictores <- grep("_(med|sd|amp)$", names(modelo_df), value = TRUE)
+rf <- ranger::ranger(
+  as.formula(paste("clase ~", paste(predictores, collapse = " + "))),
+  data = entrenamiento, num.trees = N_ARBOLES, importance = "permutation", seed = 2026)
+
+pred <- predict(rf, data = prueba)$predictions
+mc <- table(Observado = prueba$clase, Predicho = pred)
+exactitud <- sum(diag(mc)) / sum(mc)
+nn <- sum(mc)
+esperado <- sum(rowSums(mc) * colSums(mc)) / nn^2
+kappa <- (exactitud - esperado) / (1 - esperado)
+base_may <- max(table(entrenamiento$clase)) / nrow(entrenamiento)
+
+knitr::kable(
+  data.frame(
+    Medida = c("Exactitud global", "Kappa de Cohen",
+               "Línea base (clase mayoritaria)", "Error out-of-bag"),
+    Valor = c(pct(exactitud), sub("\\.", ",", sprintf("%.3f", kappa)),
+              pct(base_may), pct(rf$prediction.error))),
+  caption = "Desempeño sobre sitios no vistos", align = c("l", "r"))
+```
+
+```{r barras-modelo, eval=MODELAR, fig.height=3.6}
+comp <- data.frame(
+  medida = factor(c("Modelo satelital", "Línea base (clase mayoritaria)"),
+                  levels = c("Línea base (clase mayoritaria)", "Modelo satelital")),
+  valor = c(exactitud, base_may))
+
+ggplot(comp, aes(x = valor, y = medida)) +
+  geom_col(aes(fill = medida), width = 0.5) +
+  geom_text(aes(label = pct(valor)), hjust = -0.12, colour = TINTA, size = 4,
+            fontface = "bold") +
+  scale_fill_manual(values = setNames(c(EJE, AZUL[3]), levels(comp$medida)), guide = "none") +
+  scale_x_continuous(labels = function(v) pct(v, 0),
+                     limits = c(0, max(comp$valor) * 1.3),
+                     expand = expansion(mult = c(0, 0.02))) +
+  labs(title = if (exactitud > base_may + 0.05)
+                 "El modelo aporta sobre la línea base"
+               else "El modelo no aporta sobre la línea base",
+       subtitle = paste0("Exactitud sobre ", nrow(prueba),
+                         " registros de sitios no vistos"),
+       x = NULL, y = NULL) +
+  tema_viz() + theme(panel.grid.major.y = element_blank())
+```
+
+```{r conf-modelo, eval=MODELAR, fig.height=4.8}
+mc_df <- as.data.frame(mc); names(mc_df) <- c("Observado", "Predicho", "n")
+umbral_txt <- max(mc_df$n) * 0.55
+
+ggplot(mc_df, aes(x = Predicho, y = Observado)) +
+  geom_tile(aes(fill = n), colour = LIENZO, linewidth = 2) +
+  geom_text(aes(label = ifelse(n == 0, "", n), colour = n > umbral_txt),
+            size = 4, fontface = "bold") +
+  scale_fill_gradientn(colours = c(LIENZO, AZUL[1], AZUL[3], AZUL[6]), name = "Casos") +
+  scale_colour_manual(values = c(`TRUE` = "#ffffff", `FALSE` = TINTA), guide = "none") +
+  scale_y_discrete(limits = rev) +
+  labs(title = "Matriz de confusión del tipo de bosque",
+       subtitle = "Diagonal = acierto. Filas = tipo real, columnas = tipo predicho.",
+       x = "Predicho", y = "Observado") +
+  tema_viz() +
+  theme(panel.grid = element_blank(), axis.text.x = element_text(angle = 20, hjust = 1))
+```
+
+## La unidad que cuenta es el sitio
+
+Los árboles de un mismo conglomerado comparten píxel y comparten etiqueta, así que
+los `r nrow(prueba)` registros de prueba no son observaciones independientes: valen
+por los `r dplyr::n_distinct(prueba$sitio)` sitios de los que provienen. La cifra
+honesta es el acierto por sitio, resolviendo cada uno por mayoría de sus árboles.
+
+```{r exactitud-sitio, eval=MODELAR}
+por_sitio <- data.frame(sitio = prueba$sitio,
+                        real = as.character(prueba$clase),
+                        pred = as.character(pred)) |>
+  dplyr::group_by(sitio) |>
+  dplyr::summarise(
+    real = names(sort(table(real), decreasing = TRUE))[1],
+    pred = names(sort(table(pred), decreasing = TRUE))[1],
+    .groups = "drop"
+  )
+
+exact_sitio <- mean(por_sitio$real == por_sitio$pred)
+base_sitio  <- max(table(por_sitio$real)) / nrow(por_sitio)
+
+knitr::kable(
+  data.frame(
+    Medida = c("Sitios de prueba", "Acierto por sitio",
+               "Línea base por sitio", "Acierto por árbol (referencia)"),
+    Valor = c(mil(nrow(por_sitio)), pct(exact_sitio), pct(base_sitio), pct(exactitud))
+  ),
+  caption = "Desempeño con el sitio como unidad de análisis", align = c("l", "r")
+)
+```
+
+```{r lectura-modelo, eval=MODELAR, results='asis'}
+if (exact_sitio > base_sitio + 0.05) {
+  cat("Con el sitio como unidad, el clasificador acierta el ", pct(exact_sitio),
+      " frente a una línea base de ", pct(base_sitio), ", es decir ",
+      sub("\\.", ",", sprintf("%+.1f", 100 * (exact_sitio - base_sitio))),
+      " puntos. Hay señal estructural aprovechable: el grado de intervención deja ",
+      "una huella que el sensor capta.\n\n", sep = "")
+} else {
+  cat("Con el sitio como unidad, el clasificador acierta el ", pct(exact_sitio),
+      " frente a una línea base de ", pct(base_sitio),
+      ". La ventaja que aparecía contando por árbol se diluye al usar la unidad ",
+      "correcta.\n\n", sep = "")
+}
+
+cat("Un apunte sobre el error *out-of-bag* de la tabla anterior: es de ",
+    pct(rf$prediction.error), ", muy por debajo del error real. No es un buen ",
+    "indicador aquí, porque el remuestreo del bosque aleatorio reparte árboles del ",
+    "mismo conglomerado entre las muestras dentro y fuera de bolsa, que es ",
+    "exactamente la fuga que la partición por sitio evita. Se reporta por ",
+    "completitud, no como medida de desempeño.\n", sep = "")
+```
+
+---
+
+# Qué haría falta para un inventario volumétrico
+
+Para llegar a metros cúbicos por hectárea —la cifra que sostiene cualquier decisión
+de aprovechamiento— hace falta el censo completo, no el extracto florístico. En
+orden de utilidad:
+
+**El inventario completo de la ENF.** Los formularios de campo registran todos los
+árboles sobre el diámetro mínimo de cada parcela. Se solicitan al MAATE a través de
+la Evaluación Nacional Forestal. Ese dato sí permite volumen por hectárea, por
+estrato y por especie.
+
+**Los programas de corta aprobados.** El MAG aprueba programas de aprovechamiento
+con inventarios al ciento por ciento sobre el área a intervenir. Son datos
+volumétricos reales, georreferenciados y de especies comerciales.
+
+**El mapa de plantaciones forestales incentivadas** (MAG, 1:5.000, 2013–2018) y
+**SDPT v2** (WRI / Global Forest Watch). Para plantaciones, donde cada polígono es
+una especie y cubre decenas de píxeles, el enfoque satelital sí rinde: ahí la
+clasificación de especie es viable y el volumen se estima con modelos alométricos
+por edad de rodal.
+
+Sobre la última: si el objetivo es aprovechamiento comercial, las plantaciones son
+además el caso de negocio más claro. El bosque nativo tiene restricciones legales de
+aprovechamiento, diversidad altísima y accesibilidad difícil; una plantación de
+balsa, teca o pino es monoespecífica, está mapeada y tiene ciclo de corta conocido.
+
+La maquinaria de este documento —búsqueda en catálogo, lectura remota de imágenes
+sin descargar escenas completas, enmascaramiento de nubes, resumen espectro-temporal
+y validación por sitio— se reutiliza sin cambios para cualquiera de esas fuentes.
+Lo único que se sustituye es el origen de los registros.
+
+---
+
+# Manabí: serie mensual, composición y proyección
+
+Esta sección cambia de escala. En lugar de puntos dispersos por todo el país, se
+concentra en un área de `r MANABI_RADIO_KM` km de radio sobre Manabí, con una imagen
+por mes desde enero de 2023 hasta hoy, y proyecta el comportamiento de la vegetación
+tres años hacia adelante.
+
+```{r manabi-aoi}
+centro_man <- sf::st_sfc(sf::st_point(c(MANABI_LON, MANABI_LAT)), crs = 4326)
+aoi_man <- centro_man |>
+  sf::st_transform(32717) |>
+  sf::st_buffer(MANABI_RADIO_KM * 1000) |>
+  sf::st_transform(4326)
+
+bb_man <- as.numeric(sf::st_bbox(aoi_man))
+
+set.seed(2026)
+muestra_man <- sf::st_sample(aoi_man, N_MUESTRA, type = "regular") |>
+  sf::st_as_sf() |>
+  dplyr::mutate(pid = dplyr::row_number())
+names(muestra_man)[names(muestra_man) == "x"] <- "geometry"
+sf::st_geometry(muestra_man) <- "geometry"
+```
+
+```{r manabi-escenas}
+# Búsqueda mensual acotada al área de interés. Se tolera más nubosidad que en el
+# resto del documento: en la costa ecuatoriana un mes entero puede no tener nada
+# mejor, y para una serie temporal conviene un dato mediocre antes que un hueco.
+buscar_mes <- function(anio, mes) {
+  ini <- sprintf("%04d-%02d-01", anio, mes)
+  fin <- as.character(seq(as.Date(ini), by = "month", length.out = 2)[2] - 1)
+  q <- rstac::stac(STAC_URL) |>
+    rstac::stac_search(collections = COLECCION, bbox = bb_man,
+      datetime = paste0(ini, "T00:00:00Z/", fin, "T23:59:59Z"), limit = 50)
+  r <- try(con_reintento(rstac::post_request(q), 3, 4), silent = TRUE)
+  Sys.sleep(0.6)
+  if (inherits(r, "try-error")) return(NULL)
+  r
+}
+
+meses <- seq(as.Date(MANABI_INI), to = as.Date(format(Sys.Date(), "%Y-%m-01")),
+             by = "month")
+
+catalogo_mes <- lapply(meses, function(m) {
+  a <- as.integer(format(m, "%Y")); s <- as.integer(format(m, "%m"))
+  res <- en_cache(sprintf("man_stac_%04d%02d", a, s), buscar_mes(a, s))
+  if (is.null(res) || rstac::items_length(res) == 0) return(NULL)
+
+  ids <- sapply(res$features, `[[`, "id")
+  mt  <- tabla_meta(res$features)
+  mt  <- mt[mt$nubes <= NUBE_MAX_MES, , drop = FALSE]
+  if (nrow(mt) == 0) return(NULL)
+
+  sirve <- vapply(mt$id, function(i) escena_utilizable(res$features[[match(i, ids)]]),
+                  logical(1))
+  mt <- mt[sirve, , drop = FALSE]
+  if (nrow(mt) == 0) return(NULL)
+
+  mejor <- mt[which.min(mt$nubes), ]
+  list(mes = m, meta = mejor, feature = res$features[[match(mejor$id, ids)]])
+})
+names(catalogo_mes) <- format(meses, "%Y-%m")
+catalogo_mes <- catalogo_mes[!vapply(catalogo_mes, is.null, logical(1))]
+
+cobertura_mes <- length(catalogo_mes) / length(meses)
+HAY_MESES <- length(catalogo_mes) > 0
+```
+
+```{r manabi-diag, results='asis'}
+cat("Se consultaron ", length(meses), " meses (", format(min(meses), "%Y-%m"), " a ",
+    format(max(meses), "%Y-%m"), ") y ", length(catalogo_mes),
+    " tienen escena utilizable bajo ", NUBE_MAX_MES, "% de nubes (",
+    pct(cobertura_mes, 0), ").\n", sep = "")
+if (!HAY_MESES) {
+  cat("\nNinguno devolvió imagen. Subir `NUBE_MAX_MES`, ampliar `MANABI_RADIO_KM` ",
+      "o revisar la conexión al catálogo.\n", sep = "")
+}
+```
+
+```{r manabi-extraer, eval=HAY_MESES}
+BANDAS_MES <- c("red", "nir", "swir16")
+
+extraer_mes <- function(item) {
+  pr <- sf::st_transform(muestra_man, item$meta$epsg)
+  vp <- terra::vect(pr)
+  v  <- list()
+  for (b in c(BANDAS_MES, "scl")) {
+    h <- href_de(item$feature, b)
+    if (is.na(h)) return(NULL)
+    v[[b]] <- as.numeric(terra::extract(terra::rast(paste0("/vsicurl/", h)),
+                                        vp, ID = FALSE)[[1]])
+  }
+  d <- as.data.frame(v)
+  d$pid <- pr$pid
+  d$mes <- item$mes
+  desp <- if (isTRUE(item$meta$offset_aplicado)) 0 else -1000
+  esc <- function(x) if (item$meta$fecha >= as.Date("2022-01-25") &&
+                         !isTRUE(item$meta$offset_aplicado)) (x + desp)/10000 else x/10000
+  for (b in BANDAS_MES) d[[b]] <- esc(d[[b]])
+  d
+}
+
+serie_man <- do.call(rbind, lapply(names(catalogo_mes), function(k) {
+  r <- try(en_cache(paste0("man_refl_", gsub("-", "", k), "_", N_MUESTRA),
+                    extraer_mes(catalogo_mes[[k]]),
+                    columnas = c(BANDAS_MES, "scl", "pid", "mes")), silent = TRUE)
+  if (inherits(r, "try-error")) NULL else r
+}))
+
+HAY_SERIE <- !is.null(serie_man) && nrow(serie_man) > 0
+
+if (HAY_SERIE) {
+  serie_man <- serie_man |>
+    dplyr::filter(!scl %in% SCL_MALOS, !is.na(scl)) |>
+    dplyr::filter(dplyr::if_all(dplyr::all_of(BANDAS_MES),
+                                ~ !is.na(.x) & .x > 0 & .x < 1.2)) |>
+    dplyr::mutate(ndvi = (nir - red) / (nir + red),
+                  ndmi = (nir - swir16) / (nir + swir16))
+
+  mensual <- serie_man |>
+    dplyr::group_by(mes) |>
+    dplyr::summarise(ndvi = median(ndvi), ndmi = median(ndmi),
+                     n = dplyr::n(), .groups = "drop") |>
+    dplyr::filter(n >= 10) |>
+    dplyr::arrange(mes)
+  # 12 meses es el mínimo para que un ajuste estacional tenga sentido
+  HAY_SERIE <- nrow(mensual) >= 12
+}
+```
+
+```{r manabi-diag-serie, results='asis'}
+if (HAY_SERIE) {
+  cat("Tras enmascarar nubes quedan ", nrow(mensual), " meses con al menos 10 puntos ",
+      "válidos, sobre un máximo posible de ", length(catalogo_mes), ".\n", sep = "")
+} else if (HAY_MESES) {
+  n_ok <- if (exists("mensual")) nrow(mensual) else 0
+  cat("Solo ", n_ok, " meses superaron el enmascaramiento de nubes, y se necesitan ",
+      "al menos 12 para ajustar un ciclo estacional. Las secciones de serie, ",
+      "proyección y escenarios quedan sin ejecutar; los mosaicos de imagen sí ",
+      "continúan. Subir `NUBE_MAX_MES` o ampliar `MANABI_RADIO_KM` mejora la ",
+      "disponibilidad.\n", sep = "")
+}
+```
+
+Los huecos de cobertura se concentran en la estación lluviosa, que en la costa
+ecuatoriana va de enero a abril.
+
+## La serie mensual de vegetación
+
+```{r manabi-serie, eval=HAY_SERIE, fig.height=5}
+ggplot(mensual, aes(x = mes)) +
+  geom_line(aes(y = ndvi, colour = "NDVI (verdor)"), linewidth = 0.9) +
+  geom_point(aes(y = ndvi, colour = "NDVI (verdor)"), size = 1.8) +
+  geom_line(aes(y = ndmi, colour = "NDMI (humedad)"), linewidth = 0.9) +
+  geom_point(aes(y = ndmi, colour = "NDMI (humedad)"), size = 1.8) +
+  scale_colour_manual(values = c("NDVI (verdor)" = PAL_CAT[3],
+                                 "NDMI (humedad)" = PAL_CAT[1]), name = NULL) +
+  labs(title = "Tres años de vegetación en Manabí, mes a mes",
+       subtitle = paste0("Mediana de ", N_MUESTRA, " puntos de muestreo sobre un área de ",
+                         MANABI_RADIO_KM, " km de radio"),
+       x = NULL, y = "Índice") +
+  tema_viz() + theme(legend.position = "top")
+```
+
+El bosque seco de Manabí es marcadamente estacional: pierde hoja en la época seca y
+reverdece con las lluvias. Esa oscilación domina la serie y hay que separarla de la
+tendencia antes de proyectar nada.
+
+## Las imágenes, mes a mes
+
+```{r manabi-mosaico, eval=HAY_MESES, fig.height=7.5}
+sel_meses <- names(catalogo_mes)[round(seq(1, length(catalogo_mes),
+                                           length.out = min(9, length(catalogo_mes))))]
+sel_meses <- unique(sel_meses)
+
+ndvi_chip <- function(k) {
+  it <- catalogo_mes[[k]]
+  a  <- sf::st_transform(aoi_man, it$meta$epsg)
+  e  <- terra::ext(terra::vect(a))
+  hr <- href_de(it$feature, "red"); hn <- href_de(it$feature, "nir")
+  if (is.na(hr) || is.na(hn)) return(NULL)
+  rr <- terra::crop(terra::rast(paste0("/vsicurl/", hr)), e)
+  nr <- terra::crop(terra::rast(paste0("/vsicurl/", hn)), e)
+  nd <- (nr - rr) / (nr + rr)
+  nd <- terra::aggregate(nd, fact = 4, fun = "mean", na.rm = TRUE)
+  d  <- as.data.frame(nd, xy = TRUE, na.rm = TRUE)
+  names(d)[3] <- "ndvi"
+  d <- d[is.finite(d$ndvi), , drop = FALSE]
+  if (nrow(d) < 100) return(NULL)
+  d$xr <- (d$x - min(d$x)) / max(diff(range(d$x)), 1)
+  d$yr <- (d$y - min(d$y)) / max(diff(range(d$y)), 1)
+  d$panel <- k
+  d[, c("xr", "yr", "ndvi", "panel")]
+}
+
+mosaico <- do.call(rbind, lapply(sel_meses, function(k) {
+  r <- try(en_cache(paste0("man_ndvi_", gsub("-", "", k)), ndvi_chip(k)), silent = TRUE)
+  if (inherits(r, "try-error")) NULL else r
+}))
+
+HAY_MOSAICO <- !is.null(mosaico) && nrow(mosaico) > 0
+
+if (HAY_MOSAICO) {
+  print(ggplot(mosaico, aes(xr, yr, fill = ndvi)) +
+    geom_raster() +
+    facet_wrap(~ panel, ncol = 3) +
+    coord_fixed(expand = FALSE) +
+    scale_fill_gradientn(colours = c("#b8860b", "#e8d8a0", "#9fcf7a", "#1baf7a", "#0d5c3a"),
+                         limits = c(0, 1), name = "NDVI") +
+    labs(title = "El pulso estacional del bosque seco, visto desde el satélite",
+         subtitle = "NDVI sobre el área de estudio. Tonos ocres: dosel sin hoja. Verdes: dosel activo.",
+         x = NULL, y = NULL) +
+    tema_viz() +
+    theme(axis.text = element_blank(), panel.grid = element_blank(),
+          strip.text = element_text(size = 8)))
+}
+```
+
+```{r manabi-sin-mosaico, eval=!HAY_MOSAICO, results='asis'}
+cat("No se pudieron componer los mosaicos mensuales de NDVI.\n")
+```
+
+## Clima observado
+
+```{r manabi-clima}
+# Se inicializa aquí, en un bloque que siempre corre: si el bloque que lo calcula
+# queda desactivado, los que lo usan como condición seguirían encontrándolo.
+HAY_ACOPLE <- FALSE
+
+clima_power <- function(lon, lat, ini, fin) {
+  u <- paste0("https://power.larc.nasa.gov/api/temporal/monthly/point",
+              "?parameters=PRECTOTCORR,T2M&community=AG",
+              "&longitude=", lon, "&latitude=", lat,
+              "&start=", ini, "&end=", fin, "&format=JSON")
+  j <- jsonlite::fromJSON(u, simplifyVector = FALSE)
+  par <- j$properties$parameter
+  arma <- function(nm) {
+    v <- par[[nm]]; k <- names(v)
+    ok <- grepl("^[0-9]{6}$", k) & substr(k, 5, 6) != "13"
+    data.frame(anio = as.integer(substr(k[ok], 1, 4)),
+               mm   = as.integer(substr(k[ok], 5, 6)),
+               valor = as.numeric(unlist(v[ok], use.names = FALSE)),
+               var = nm, stringsAsFactors = FALSE)
+  }
+  rbind(arma("PRECTOTCORR"), arma("T2M"))
+}
+
+anio_ini_cl <- as.integer(format(min(meses), "%Y")) - 9
+clima <- try(en_cache(paste0("man_clima_", anio_ini_cl),
+                      clima_power(MANABI_LON, MANABI_LAT, anio_ini_cl,
+                                  as.integer(format(Sys.Date(), "%Y")))),
+             silent = TRUE)
+
+HAY_CLIMA <- !inherits(clima, "try-error") && is.data.frame(clima) && nrow(clima) > 0
+if (HAY_CLIMA) {
+  clima <- clima |>
+    dplyr::filter(valor > -900) |>
+    dplyr::mutate(mes = as.Date(sprintf("%04d-%02d-01", anio, mm)))
+}
+```
+
+```{r manabi-sin-clima, eval=!HAY_CLIMA, results='asis'}
+cat("No se pudo recuperar la serie climática de NASA POWER. El resto de la sección ",
+    "continúa sin ella.\n", sep = "")
+```
+
+```{r manabi-clima-graf, eval=HAY_CLIMA, fig.height=6}
+lluvia <- clima |> dplyr::filter(var == "PRECTOTCORR")
+temp   <- clima |> dplyr::filter(var == "T2M")
+
+norm_ll <- lluvia |> dplyr::group_by(mm) |>
+  dplyr::summarise(normal = mean(valor), .groups = "drop")
+lluvia <- lluvia |> dplyr::left_join(norm_ll, by = "mm") |>
+  dplyr::mutate(anomalia = valor - normal)
+
+g1 <- ggplot(lluvia, aes(x = mes, y = anomalia, fill = anomalia > 0)) +
+  geom_col(width = 25) +
+  scale_fill_manual(values = c(`TRUE` = PAL_CAT[1], `FALSE` = "#b8860b"),
+                    labels = c(`TRUE` = "Más lluvia que lo normal",
+                               `FALSE` = "Menos lluvia"), name = NULL) +
+  labs(title = "Anomalía de lluvia en Manabí",
+       subtitle = paste0("Desviación respecto al promedio mensual ", anio_ini_cl,
+                         "–", format(Sys.Date(), "%Y"), ". Fuente: NASA POWER."),
+       x = NULL, y = "mm/día sobre lo normal") +
+  tema_viz() + theme(legend.position = "top")
+
+g2 <- ggplot(temp, aes(x = mes, y = valor)) +
+  geom_line(colour = APAGADO, linewidth = 0.4) +
+  geom_smooth(method = "lm", se = TRUE, colour = ALERTA, fill = alpha(ALERTA, 0.15),
+              linewidth = 0.7) +
+  labs(title = "Temperatura media mensual y su tendencia",
+       subtitle = "La pendiente de la recta es la señal de calentamiento local observado",
+       x = NULL, y = "°C") +
+  tema_viz()
+
+print(g1); print(g2)
+```
+
+```{r manabi-tendencia-temp, eval=HAY_CLIMA, results='asis'}
+mt <- stats::lm(valor ~ as.numeric(mes), data = temp)
+pend_dec <- unname(coef(mt)[2]) * 3652.5
+p_val <- summary(mt)$coefficients[2, 4]
+cat("La temperatura media local sube ", num(pend_dec, 2), " °C por década ",
+    "(p = ", format.pval(p_val, digits = 2), "). ",
+    if (p_val < 0.05) "La tendencia es estadísticamente distinta de cero."
+    else "La tendencia no alcanza significancia con este periodo.",
+    "\n", sep = "")
+```
+
+## Qué gobierna el verdor: lluvia, no tendencia
+
+```{r manabi-lluvia-ndvi, eval=HAY_SERIE && HAY_CLIMA, fig.height=5}
+acople <- mensual |>
+  dplyr::mutate(mm = as.integer(format(mes, "%m")),
+                anio = as.integer(format(mes, "%Y"))) |>
+  dplyr::inner_join(dplyr::select(lluvia, anio, mm, lluvia = valor, anomalia),
+                    by = c("anio", "mm"))
+
+HAY_ACOPLE <- nrow(acople) >= 12
+
+if (HAY_ACOPLE) {
+  rho <- stats::cor(acople$lluvia, acople$ndvi, use = "complete.obs")
+  print(ggplot(acople, aes(x = lluvia, y = ndvi)) +
+    geom_point(aes(colour = mm), size = 2.4, alpha = 0.85) +
+    geom_smooth(method = "lm", se = TRUE, colour = TINTA_2,
+                fill = alpha(TINTA_2, 0.12), linewidth = 0.7) +
+    scale_colour_gradientn(colours = c(AZUL[5], AZUL[2], "#b8860b", AZUL[2], AZUL[5]),
+                           breaks = c(1, 4, 7, 10), name = "Mes") +
+    labs(title = paste0("El verdor sigue a la lluvia (correlación ", num(rho, 2), ")"),
+         subtitle = "Cada punto es un mes con imagen utilizable",
+         x = "Lluvia media del mes (mm/día)", y = "NDVI mediano") +
+    tema_viz())
+}
+```
+
+## Proyección a tres años
+
+```{r manabi-proyeccion, eval=HAY_SERIE, fig.height=5.6}
+# Modelo estacional-más-tendencia: dos armónicos anuales sobre una recta temporal.
+# Es extrapolación de la serie observada, no un modelo climático.
+base_t <- as.numeric(min(mensual$mes))
+mensual <- mensual |>
+  dplyr::mutate(t = (as.numeric(mes) - base_t) / 365.25,
+                s1 = sin(2*pi*t), c1 = cos(2*pi*t),
+                s2 = sin(4*pi*t), c2 = cos(4*pi*t))
+
+mod <- stats::lm(ndvi ~ t + s1 + c1 + s2 + c2, data = mensual)
+
+inicio_fut <- seq(max(mensual$mes), by = "month", length.out = 2)[2]
+fut <- data.frame(mes = seq(inicio_fut, by = "month", length.out = HORIZONTE)) |>
+  dplyr::mutate(t = (as.numeric(mes) - base_t) / 365.25,
+                s1 = sin(2*pi*t), c1 = cos(2*pi*t),
+                s2 = sin(4*pi*t), c2 = cos(4*pi*t))
+
+pi_fut <- as.data.frame(stats::predict(mod, newdata = fut, interval = "prediction"))
+fut <- cbind(fut, pi_fut)
+
+obs <- mensual |> dplyr::transmute(mes, ndvi, tipo = "Observado")
+
+ggplot() +
+  geom_ribbon(data = fut, aes(x = mes, ymin = lwr, ymax = upr),
+              fill = AZUL[1], alpha = 0.35) +
+  geom_line(data = fut, aes(x = mes, y = fit), colour = AZUL[5],
+            linewidth = 0.9, linetype = "22") +
+  geom_line(data = obs, aes(x = mes, y = ndvi), colour = TINTA_2, linewidth = 0.8) +
+  geom_point(data = obs, aes(x = mes, y = ndvi), colour = TINTA_2, size = 1.5) +
+  geom_vline(xintercept = as.numeric(max(mensual$mes)), colour = APAGADO,
+             linetype = "22", linewidth = 0.4) +
+  annotate("text", x = max(mensual$mes), y = min(fut$lwr),
+           label = "  proyección →", hjust = 0, colour = APAGADO, size = 3.2) +
+  labs(title = "NDVI proyectado a tres años",
+       subtitle = "Estacionalidad más tendencia, con banda de predicción del 95%",
+       caption = paste0("Extrapolación de la serie observada. No es un modelo ",
+                        "climático: supone que la estacionalidad se mantiene y que ",
+                        "no hay perturbación mayor."),
+       x = NULL, y = "NDVI") +
+  tema_viz()
+```
+
+```{r manabi-lectura-proy, eval=HAY_SERIE, results='asis'}
+pend <- unname(coef(mod)["t"])
+pv <- summary(mod)$coefficients["t", 4]
+amp <- diff(range(fut$fit))
+ancho <- mean(fut$upr - fut$lwr)
+
+cat("La tendencia ajustada es de ", num(pend, 4), " unidades de NDVI por año (p = ",
+    format.pval(pv, digits = 2), "). ",
+    if (pv < 0.05) "Es distinta de cero, " else "No es distinguible de cero, ",
+    "y en cualquier caso su magnitud queda muy por debajo de la oscilación ",
+    "estacional, que recorre ", num(amp, 3), " unidades cada año.\n\n", sep = "")
+
+razon <- ancho / max(amp, 1e-9)
+cat("**La banda de predicción mide ", num(ancho, 3), " unidades de ancho**, es decir ",
+    "el ", pct(razon, 0), " de la oscilación estacional. ",
+    if (razon > 0.5) paste0("Es una banda ancha, y eso no es un defecto del ajuste: ",
+                            "es la respuesta honesta. ")
+    else paste0("La banda es relativamente estrecha porque el patrón estacional es ",
+                "muy regular, pero conviene no confundir regularidad con ",
+                "previsibilidad. "),
+    "En la costa ecuatoriana la variabilidad interanual la manda El Niño, que ",
+    "reorganiza por completo el régimen de lluvias y no es predecible a tres años. ",
+    "La banda recoge la dispersión observada en el propio periodo ajustado; si en el ",
+    "horizonte ocurre un evento de magnitud inusual, el error real será mayor que el ",
+    "declarado.\n\n", sep = "")
+
+cat("Lo que sí se puede afirmar con la serie: cuánto reverdece el bosque cada año, ",
+    "en qué meses, y cuánto se aparta un año concreto de su propio patrón. Eso basta ",
+    "para detectar una sequía en curso o una pérdida de cobertura, que operativamente ",
+    "vale más que una cifra puntual a tres años.\n", sep = "")
+```
+
+## Escenarios de lluvia
+
+```{r manabi-escenarios, eval=HAY_SERIE && HAY_CLIMA && HAY_ACOPLE, fig.height=5}
+mod_ll <- stats::lm(ndvi ~ lluvia + s1 + c1, data = dplyr::mutate(acople,
+  t = (as.numeric(mes) - base_t)/365.25, s1 = sin(2*pi*t), c1 = cos(2*pi*t)))
+
+q_ll <- stats::quantile(lluvia$valor, c(0.15, 0.5, 0.85), na.rm = TRUE)
+
+esc <- do.call(rbind, lapply(seq_along(q_ll), function(i) {
+  d <- fut |> dplyr::mutate(lluvia = q_ll[i])
+  d$ndvi <- stats::predict(mod_ll, newdata = d)
+  d$escenario <- c("Seco (percentil 15)", "Normal (mediana)",
+                   "Húmedo (percentil 85)")[i]
+  d[, c("mes", "ndvi", "escenario")]
+}))
+
+ggplot(esc, aes(x = mes, y = ndvi, colour = escenario)) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = c("Seco (percentil 15)" = "#b8860b",
+                                 "Normal (mediana)" = PAL_CAT[3],
+                                 "Húmedo (percentil 85)" = PAL_CAT[1]), name = NULL) +
+  labs(title = "Qué pasaría con el verdor bajo tres regímenes de lluvia",
+       subtitle = "Respuesta ajustada sobre la relación observada entre lluvia y NDVI",
+       caption = "Los escenarios son niveles de lluvia observados históricamente, no proyecciones climáticas.",
+       x = NULL, y = "NDVI esperado") +
+  tema_viz() + theme(legend.position = "top")
+```
+
+```{r manabi-nota-escenarios, eval=HAY_SERIE && HAY_CLIMA && HAY_ACOPLE, results='asis'}
+d_esc <- diff(range(tapply(esc$ndvi, esc$escenario, mean)))
+cat("La diferencia de verdor entre un año seco y uno húmedo es de ", num(d_esc, 3),
+    " unidades de NDVI. Ese es el rango que importa para planificar: no la tendencia ",
+    "de fondo, sino en qué punto del ciclo de lluvias caerá el año de la cosecha.\n",
+    sep = "")
+```
+
+## Áreas protegidas
+
+```{r manabi-protegidas}
+areas_prot <- if (USAR_AREAS_PROTEGIDAS) {
+  r <- try({
+    if (!requireNamespace("wdpar", quietly = TRUE)) install.packages("wdpar", quiet = TRUE)
+    w <- wdpar::wdpa_fetch("Ecuador", wait = TRUE, download_dir = CACHE_DIR)
+    w <- sf::st_make_valid(sf::st_transform(w, 4326))
+    w[, intersect(c("NAME", "DESIG_ESP", "IUCN_CAT", "MARINE"), names(w))]
+  }, silent = TRUE)
+  if (inherits(r, "try-error")) NULL else r
+} else NULL
+
+HAY_AP <- !is.null(areas_prot) && nrow(areas_prot) > 0
+if (HAY_AP) {
+  ap_man <- try(suppressWarnings(sf::st_crop(areas_prot, sf::st_bbox(aoi_man))),
+                silent = TRUE)
+  if (inherits(ap_man, "try-error")) { HAY_AP <- FALSE } else {
+    ap_man <- ap_man[!sf::st_is_empty(ap_man), ]
+    HAY_AP <- nrow(ap_man) > 0
+  }
+}
+```
+
+```{r manabi-mapa-ap, eval=HAY_AP, fig.height=7}
+ggplot() +
+  geom_sf(data = aoi_man, fill = "#f0efec", colour = EJE, linewidth = 0.4) +
+  geom_sf(data = ap_man, fill = alpha(PAL_CAT[3], 0.45), colour = PAL_CAT[3],
+          linewidth = 0.4) +
+  geom_sf(data = muestra_man, colour = APAGADO, size = 0.35, alpha = 0.5) +
+  labs(title = "Áreas protegidas dentro del área de estudio",
+       subtitle = "Polígonos de la Base Mundial de Áreas Protegidas (WDPA)",
+       caption = "En estas superficies el aprovechamiento forestal está restringido o prohibido.",
+       x = NULL, y = NULL) +
+  tema_viz() +
+  theme(panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+```{r manabi-ap-tabla, eval=HAY_AP}
+ap_man |>
+  sf::st_drop_geometry() |>
+  dplyr::mutate(ha = as.numeric(sf::st_area(ap_man)) / 10000) |>
+  dplyr::arrange(dplyr::desc(ha)) |>
+  head(10) |>
+  dplyr::transmute(Área = NAME,
+                   Categoría = if ("IUCN_CAT" %in% names(ap_man)) IUCN_CAT else NA,
+                   Hectáreas = mil(round(ha))) |>
+  knitr::kable(caption = "Áreas protegidas que intersectan el área de estudio",
+               align = c("l", "l", "r"))
+```
+
+```{r manabi-sin-ap, eval=!HAY_AP, results='asis'}
+cat("No se pudieron incorporar las áreas protegidas. El paquete `wdpar` descarga ",
+    "desde Protected Planet y a veces el servicio no responde; volver a tejer suele ",
+    "bastar. Si sigue fallando, poner `USAR_AREAS_PROTEGIDAS` en `FALSE` para omitir ",
+    "esta parte, o descargar el polígono de Ecuador manualmente desde ",
+    "protectedplanet.net.\n", sep = "")
+```
+
+## Plantado o natural
+
+```{r manabi-plantaciones, results='asis'}
+cat("Distinguir plantación de bosque natural requiere una capa de referencia. La ",
+    "opción abierta es la **Base Espacial de Árboles Plantados** (SDPT, WRI / Global ",
+    "Forest Watch), que publica polígonos de plantación con especie. Es una ",
+    "geodatabase global de varios gigabytes, de modo que no se descarga aquí.\n\n",
+    "Con esa capa, la sección de clasificación de este documento se reorienta sin ",
+    "cambios de código: los polígonos de rodal sustituyen a los puntos del ",
+    "inventario y el objetivo pasa a ser la especie plantada. En Manabí eso ",
+    "significa teca y balsa, que son monoespecíficas, tienen fenología marcada y ",
+    "cubren decenas de píxeles por rodal: las tres condiciones que faltaban en el ",
+    "bosque nativo.\n\n", sep = "")
+
+if (HAY_SERIE) {
+  amp_p <- serie_man |>
+    dplyr::group_by(pid) |>
+    dplyr::summarise(amplitud = diff(range(ndvi)), n = dplyr::n(), .groups = "drop") |>
+    dplyr::filter(n >= 12)
+  if (nrow(amp_p) >= 30) {
+    cat("Entretanto, la propia serie mensual insinúa la diferencia. La amplitud ",
+        "estacional del NDVI en los ", mil(nrow(amp_p)), " puntos de muestreo va de ",
+        num(stats::quantile(amp_p$amplitud, 0.05), 2), " a ",
+        num(stats::quantile(amp_p$amplitud, 0.95), 2),
+        ". Los rodales manejados tienden al extremo alto y sincronizado; el bosque ",
+        "natural, más heterogéneo, al bajo. Es un indicio, no una clasificación ",
+        "validada: sin polígonos de referencia no hay forma de comprobar el acierto.\n",
+        sep = "")
+  }
+}
+```
+
+```{r manabi-amplitud, eval=HAY_SERIE, fig.height=4.6}
+if (exists("amp_p") && nrow(amp_p) >= 30) {
+  print(ggplot(amp_p, aes(x = amplitud)) +
+    geom_histogram(bins = 30, fill = AZUL[3], colour = LIENZO, linewidth = 0.3) +
+    labs(title = "Amplitud estacional del NDVI punto por punto",
+         subtitle = "Una distribución con dos modas sugeriría coexistencia de rodal manejado y bosque natural",
+         x = "Amplitud anual de NDVI", y = "Puntos de muestreo") +
+    tema_viz())
+}
+```
+
+## Especies y volumen en la zona
+
+```{r manabi-especies, fig.height=5.6}
+cercanos <- arboles |>
+  dplyr::filter(!is.na(lat), !is.na(lon)) |>
+  dplyr::mutate(dist_km = 111 * sqrt((lat - MANABI_LAT)^2 +
+                                     ((lon - MANABI_LON) * cos(lat * pi / 180))^2)) |>
+  dplyr::filter(dist_km <= MANABI_BUSQUEDA_KM, !is.na(volumen))
+
+HAY_ESP_MAN <- nrow(cercanos) >= 20
+
+if (HAY_ESP_MAN) {
+  top_man <- cercanos |>
+    dplyr::filter(!is.na(species), species != "") |>
+    dplyr::group_by(species) |>
+    dplyr::summarise(arboles = dplyr::n(), volumen = sum(volumen),
+                     dap = mean(dap, na.rm = TRUE), .groups = "drop") |>
+    dplyr::arrange(dplyr::desc(volumen)) |>
+    head(12)
+
+  print(ggplot(top_man, aes(x = volumen, y = reorder(species, volumen))) +
+    geom_col(fill = AZUL[3], width = 0.68) +
+    geom_text(aes(label = paste0(num(volumen, 2), " m³  ·  ", arboles, " árb.")),
+              hjust = -0.07, colour = TINTA_2, size = 3.1) +
+    scale_x_continuous(expand = expansion(mult = c(0, 0.35))) +
+    labs(title = paste0("Especies con más volumen registrado a ",
+                        MANABI_BUSQUEDA_KM, " km de Manabí"),
+         subtitle = "Volumen comercial acumulado de los árboles del inventario",
+         x = "Volumen acumulado (m³)", y = NULL) +
+    tema_viz() +
+    theme(panel.grid.major.y = element_blank(),
+          axis.text.y = element_text(face = "italic")))
+}
+```
+
+```{r manabi-mapa-especies, eval=HAY_ESP_MAN, fig.height=7}
+dom <- cercanos |>
+  dplyr::filter(!is.na(species), species != "") |>
+  dplyr::group_by(sitio, species) |>
+  dplyr::summarise(v = sum(volumen), .groups = "drop_last") |>
+  dplyr::slice_max(v, n = 1, with_ties = FALSE) |>
+  dplyr::ungroup()
+
+sitios_man <- cercanos |>
+  dplyr::group_by(sitio) |>
+  dplyr::summarise(lat = dplyr::first(lat), lon = dplyr::first(lon),
+                   volumen = sum(volumen), arboles = dplyr::n(), .groups = "drop") |>
+  dplyr::inner_join(dom, by = "sitio")
+
+top6 <- head(names(sort(tapply(sitios_man$volumen, sitios_man$species, sum),
+                        decreasing = TRUE)), 5)
+sitios_man <- sitios_man |>
+  dplyr::mutate(grupo = ifelse(species %in% top6, species, "Otras"))
+
+sm_sf <- sf::st_as_sf(sitios_man, coords = c("lon", "lat"), crs = 4326)
+
+ggplot() +
+  { if (HAY_AP) geom_sf(data = ap_man, fill = alpha(PAL_CAT[3], 0.25),
+                        colour = PAL_CAT[3], linewidth = 0.3) } +
+  geom_sf(data = aoi_man, fill = NA, colour = ALERTA, linewidth = 0.6,
+          linetype = "22") +
+  geom_sf(data = sm_sf, aes(colour = grupo, size = volumen), alpha = 0.85) +
+  scale_colour_manual(values = setNames(
+    c(PAL_CAT[seq_along(top6)], APAGADO), c(top6, "Otras")), name = "Especie dominante") +
+  scale_size_continuous(range = c(1.6, 7), name = "Volumen (m³)") +
+  labs(title = "Especie dominante y volumen por sitio",
+       subtitle = paste0("Conglomerados a menos de ", MANABI_BUSQUEDA_KM,
+                         " km de Manabí. El recuadro rojo es el área de imágenes."),
+       caption = if (HAY_AP) "En verde, áreas protegidas." else NULL,
+       x = NULL, y = NULL) +
+  tema_viz() +
+  theme(legend.position = "right",
+        legend.text = element_text(face = "italic", size = 7),
+        panel.grid.major = element_line(colour = REJILLA, linewidth = 0.2))
+```
+
+```{r manabi-sin-especies, eval=!HAY_ESP_MAN, results='asis'}
+cat("El inventario nacional no tiene conglomerados suficientes a menos de ",
+    MANABI_BUSQUEDA_KM, " km del centro elegido. Manabí es provincia de bosque seco ",
+    "y de plantación, poco representada en un inventario diseñado sobre estratos de ",
+    "bosque nativo. Ampliar `MANABI_BUSQUEDA_KM` para incluir más sitios, o cambiar ",
+    "`MANABI_LON` y `MANABI_LAT` a otra zona.\n", sep = "")
+```
+
+---
+
+# Proyección de volumen por especie
+
+Esta es la pregunta operativa del aprovechamiento: en tres años, cuánta madera
+adicional habrá y en qué especies. Se responde con un modelo de crecimiento
+diamétrico, no con el satélite.
+
+Conviene decir de entrada de dónde sale cada pieza. El diámetro y la altura
+comercial son **medidos**. La relación entre ambos se **ajusta** con esos datos. El
+incremento diamétrico anual es **supuesto**: el inventario tiene una sola medición
+por árbol, sin remedición posterior, de modo que la tasa de crecimiento no puede
+estimarse a partir de él.
+
+## La relación altura-diámetro
+
+```{r hd-ajuste, fig.height=5}
+hd <- arboles |>
+  dplyr::filter(!is.na(dap), !is.na(h_comercial), dap > 0, h_comercial > 0)
+
+mod_hd <- stats::lm(log(h_comercial) ~ log(dap), data = hd)
+r2_hd <- summary(mod_hd)$r.squared
+
+pred_hc <- function(d) {
+  as.numeric(exp(stats::predict(mod_hd, newdata = data.frame(dap = d))))
+}
+
+curva <- data.frame(dap = seq(min(hd$dap), stats::quantile(hd$dap, 0.995), length.out = 120))
+curva$h_comercial <- pred_hc(curva$dap)
+
+ggplot(hd, aes(x = dap, y = h_comercial)) +
+  geom_point(colour = AZUL[2], size = 1, alpha = 0.35) +
+  geom_line(data = curva, colour = ALERTA, linewidth = 0.9) +
+  scale_x_log10() + scale_y_log10() +
+  labs(title = "Altura comercial en función del diámetro",
+       subtitle = paste0("Ajuste potencial sobre ", mil(nrow(hd)),
+                         " árboles medidos (R² = ", num(r2_hd, 3),
+                         "). Ambos ejes en escala logarítmica."),
+       x = "DAP (cm)", y = "Altura comercial (m)") +
+  tema_viz()
+```
+
+Esta curva permite proyectar la altura a medida que el árbol engrosa, en vez de
+suponerla constante. Sin ella el volumen proyectado quedaría subestimado, porque un
+árbol que gana diámetro también gana fuste aprovechable.
+
+## Crecimiento proyectado
+
+```{r proy-especies}
+base_arb <- arboles |>
+  dplyr::filter(!is.na(dap), !is.na(volumen), !is.na(species), species != "")
+
+proyectar <- function(datos, anios, ic) {
+  do.call(rbind, lapply(0:anios, function(a) {
+    d <- datos
+    d$anio  <- a
+    d$dap_p <- d$dap + ic * a
+    d$hc_p  <- pmax(pred_hc(d$dap_p), 0.5)
+    d$vol_p <- (pi/4) * (d$dap_p/100)^2 * d$hc_p * FACTOR_FORMA
+    d[, c("species", "sitio", "anio", "dap", "dap_p", "vol_p")]
+  }))
+}
+
+proy <- proyectar(base_arb, HORIZONTE_ANIOS, IC_ANUAL)
+
+top_sp <- base_arb |>
+  dplyr::group_by(species) |>
+  dplyr::summarise(v = sum(volumen), n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 5) |>
+  dplyr::arrange(dplyr::desc(v)) |>
+  head(5) |>
+  dplyr::pull(species)
+
+serie_sp <- proy |>
+  dplyr::mutate(grupo = ifelse(species %in% top_sp, species, "Otras especies")) |>
+  dplyr::group_by(grupo, anio) |>
+  dplyr::summarise(volumen = sum(vol_p), .groups = "drop")
+```
+
+```{r graf-proy-especies, fig.height=5.6}
+niveles <- c(top_sp, "Otras especies")
+serie_sp$grupo <- factor(serie_sp$grupo, levels = niveles)
+
+ggplot(serie_sp, aes(x = anio, y = volumen, colour = grupo)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2.2) +
+  scale_colour_manual(values = setNames(c(PAL_CAT, APAGADO)[seq_along(niveles)], niveles),
+                      name = NULL) +
+  scale_x_continuous(breaks = 0:HORIZONTE_ANIOS,
+                     labels = paste0("+", 0:HORIZONTE_ANIOS, " a")) +
+  labs(title = "Volumen comercial proyectado a tres años, por especie",
+       subtitle = paste0("Incremento diamétrico supuesto de ", num(IC_ANUAL, 2),
+                         " cm/año, con altura comercial derivada del ajuste anterior"),
+       caption = "Volumen de los árboles del inventario, no volumen en pie por hectárea.",
+       x = NULL, y = "Volumen acumulado (m³)") +
+  tema_viz() + theme(legend.position = "top",
+                     legend.text = element_text(face = "italic", size = 7.5))
+```
+
+```{r tabla-proy-especies}
+ganancia <- proy |>
+  dplyr::filter(anio %in% c(0, HORIZONTE_ANIOS)) |>
+  dplyr::group_by(species, anio) |>
+  dplyr::summarise(v = sum(vol_p), .groups = "drop") |>
+  tidyr::pivot_wider(names_from = anio, values_from = v, names_prefix = "a") |>
+  dplyr::mutate(ganancia = .data[[paste0("a", HORIZONTE_ANIOS)]] - a0,
+                pct_gan = ganancia / a0)
+
+recluta <- proy |>
+  dplyr::filter(anio == HORIZONTE_ANIOS) |>
+  dplyr::group_by(species) |>
+  dplyr::summarise(nuevos = sum(dap < DMC & dap_p >= DMC),
+                   ya_dmc = sum(dap >= DMC), .groups = "drop")
+
+resumen_sp <- ganancia |>
+  dplyr::inner_join(recluta, by = "species") |>
+  dplyr::arrange(dplyr::desc(ganancia)) |>
+  head(15)
+
+resumen_sp |>
+  dplyr::transmute(
+    Especie = species,
+    `Volumen hoy (m³)` = num(a0, 2),
+    `A 3 años (m³)` = num(.data[[paste0("a", HORIZONTE_ANIOS)]], 2),
+    `Ganancia (m³)` = num(ganancia, 2),
+    `Ganancia (%)` = pct(pct_gan, 0),
+    `Ya sobre DMC` = ya_dmc,
+    `Cruzan el DMC` = nuevos
+  ) |>
+  knitr::kable(caption = paste0("Proyección a ", HORIZONTE_ANIOS,
+                                " años y reclutamiento al diámetro mínimo de corta"),
+               align = c("l", rep("r", 6)))
+```
+
+```{r lectura-proy, results='asis'}
+tot0 <- sum(proy$vol_p[proy$anio == 0])
+tot3 <- sum(proy$vol_p[proy$anio == HORIZONTE_ANIOS])
+nuevos_tot <- sum(recluta$nuevos)
+ya_tot <- sum(recluta$ya_dmc)
+
+cat("En conjunto, el volumen de los árboles inventariados pasaría de ", num(tot0, 1),
+    " a ", num(tot3, 1), " m³ en ", HORIZONTE_ANIOS, " años, una ganancia del ",
+    pct((tot3 - tot0)/tot0, 1), ".\n\n", sep = "")
+
+cat("El otro dato accionable es el reclutamiento al diámetro mínimo de corta. ",
+    "Con un incremento de ", num(IC_ANUAL, 2), " cm/año, en ", HORIZONTE_ANIOS,
+    " años un árbol engrosa apenas ", num(IC_ANUAL * HORIZONTE_ANIOS, 1), " cm, ",
+    "de modo que solo cruzan el umbral los que ya estaban muy cerca: **",
+    mil(nuevos_tot), " árboles**, sumados a los ", mil(ya_tot),
+    " que ya superan los ", DMC, " cm.\n\n", sep = "")
+
+if (nuevos_tot == 0) {
+  cat("Que el reclutamiento sea nulo no es un error del cálculo: es la consecuencia ",
+      "directa de que el DAP mediano del inventario sea de pocos centímetros y de ",
+      "que el crecimiento en bosque nativo sea lento. Tres años no mueven la ",
+      "estructura diamétrica de un bosque tropical.\n", sep = "")
+} else {
+  cat("El aumento relativo de árboles aprovechables (",
+      pct(nuevos_tot / max(ya_tot, 1), 0),
+      ") conviene compararlo con la ganancia de volumen (", pct((tot3-tot0)/tot0, 1),
+      "): son magnitudes distintas porque el volumen crece en todo el arbolado, ",
+      "mientras que el umbral de corta solo lo cruzan unos pocos.\n", sep = "")
+}
+
+cat("\nEn cualquier caso, el horizonte de tres años es corto para bosque nativo. Los ",
+    "ciclos de corta en Ecuador se fijan en décadas justamente porque el incremento ",
+    "anual es pequeño frente a los diámetros de aprovechamiento.\n", sep = "")
+```
+
+## Sensibilidad al supuesto de crecimiento
+
+La tasa de incremento es el supuesto que más pesa. Conviene ver cuánto cambia el
+resultado si se mueve, en lugar de presentar una cifra única.
+
+```{r sensibilidad, fig.height=5}
+escenarios_ic <- c(
+  setNames(IC_ANUAL * FACTOR_SECO,   paste0("Seco (", num(IC_ANUAL * FACTOR_SECO, 2), " cm/a)")),
+  setNames(IC_ANUAL,                 paste0("Central (", num(IC_ANUAL, 2), " cm/a)")),
+  setNames(IC_ANUAL * FACTOR_HUMEDO, paste0("Húmedo (", num(IC_ANUAL * FACTOR_HUMEDO, 2), " cm/a)"))
+)
+
+sens <- do.call(rbind, lapply(names(escenarios_ic), function(nm) {
+  p <- proyectar(base_arb, HORIZONTE_ANIOS, escenarios_ic[[nm]])
+  p |>
+    dplyr::group_by(anio) |>
+    dplyr::summarise(volumen = sum(vol_p), .groups = "drop") |>
+    dplyr::mutate(escenario = nm)
+}))
+sens$escenario <- factor(sens$escenario, levels = names(escenarios_ic))
+
+ggplot(sens, aes(x = anio, y = volumen, colour = escenario)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  scale_colour_manual(values = setNames(c("#b8860b", PAL_CAT[3], PAL_CAT[1]),
+                                        levels(sens$escenario)), name = NULL) +
+  scale_x_continuous(breaks = 0:HORIZONTE_ANIOS,
+                     labels = paste0("+", 0:HORIZONTE_ANIOS, " a")) +
+  labs(title = "El resultado depende del supuesto de crecimiento",
+       subtitle = paste0("Los escenarios seco y húmedo aplican un ",
+                         pct(1 - FACTOR_SECO, 0), " menos y un ",
+                         pct(FACTOR_HUMEDO - 1, 0), " más de incremento anual"),
+       caption = "Son escenarios de sensibilidad, no pronósticos climáticos.",
+       x = NULL, y = "Volumen acumulado (m³)") +
+  tema_viz() + theme(legend.position = "top")
+```
+
+```{r lectura-sens, results='asis'}
+v_fin <- tapply(sens$volumen[sens$anio == HORIZONTE_ANIOS],
+                sens$escenario[sens$anio == HORIZONTE_ANIOS], sum)
+disp <- (max(v_fin) - min(v_fin)) / stats::median(v_fin)
+
+cat("Entre el escenario seco y el húmedo hay ", pct(disp, 1),
+    " de diferencia en el volumen a ", HORIZONTE_ANIOS, " años. ",
+    "Esa horquilla proviene solo del supuesto de crecimiento; no incluye la ",
+    "incertidumbre de que el inventario publicado sea un extracto florístico, que es ",
+    "de orden muy superior.\n\n",
+    "Para cerrar esa brecha hace falta remedición: parcelas permanentes medidas en ",
+    "dos fechas. Con eso el incremento deja de ser supuesto y pasa a ser estimado, y ",
+    "la proyección adquiere intervalos de confianza reales.\n", sep = "")
+```
+
+---
+
+## Qué queda en pie de esta sección
+
+Lo verificable, en orden de solidez:
+
+**La serie mensual y su estacionalidad.** Medición directa, tres años, sin supuestos.
+Es la base para detectar sequías y pérdidas de cobertura en curso.
+
+**El acople entre lluvia y verdor.** Relación observada entre dos fuentes
+independientes, satélite y estación climática reanalizada.
+
+**Las áreas protegidas.** Cartografía oficial: dónde el aprovechamiento está
+restringido.
+
+**La proyección a tres años.** Extrapolación estacional con banda de predicción
+ancha. Útil como referencia de lo esperable, no como pronóstico. La incertidumbre
+declarada es la parte honesta del resultado.
+
+**La distinción plantado/natural.** Solo indiciaria mientras no se incorpore la capa
+de referencia. No debe presentarse como clasificación.
+
+```{r sesion, include=FALSE}
+sessionInfo()
+```

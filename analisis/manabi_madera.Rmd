@@ -1,0 +1,2378 @@
+---
+title: "Disponibilidad actual y futura de madera comercial en Manabí"
+subtitle: "Modelación de idoneidad climática bajo escenarios CMIP6 y componente dasométrico"
+author: "Andrés Acuña"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+    fig_caption: true
+bibliography: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE, warning = FALSE, message = FALSE,
+  fig.width = 9, fig.height = 5.5, dpi = 130, fig.align = "center"
+)
+options(timeout = 3600, scipen = 999)
+```
+
+```{r estilo, include=FALSE}
+PAL_CAT <- c("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4")
+AZUL    <- c("#86b6ef", "#5598e7", "#2a78d6", "#256abf", "#184f95", "#0d366b")
+VERDE   <- c("#e8f3ec", "#b9dfc8", "#7fc79f", "#3da874", "#1baf7a", "#0d5c3a")
+DIVERG  <- c("#8c3b3b", "#d03b3b", "#e9b0b0", "#f0efec", "#9ec5f4", "#2a78d6", "#184f95")
+TINTA   <- "#0b0b0b"; TINTA_2 <- "#52514e"; APAGADO <- "#898781"
+REJILLA <- "#e1e0d9"; EJE <- "#c3c2b7"; LIENZO <- "#fcfcfb"; ALERTA <- "#d03b3b"
+
+tema_viz <- function(base = 12) {
+  ggplot2::theme_minimal(base_size = base) +
+    ggplot2::theme(
+      plot.background  = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.background = ggplot2::element_rect(fill = LIENZO, colour = NA),
+      panel.grid.major = ggplot2::element_line(colour = REJILLA, linewidth = 0.3),
+      panel.grid.minor = ggplot2::element_blank(),
+      axis.line  = ggplot2::element_line(colour = EJE, linewidth = 0.4),
+      axis.ticks = ggplot2::element_blank(),
+      axis.text  = ggplot2::element_text(colour = APAGADO, size = base - 2),
+      axis.title = ggplot2::element_text(colour = TINTA_2, size = base - 1),
+      plot.title = ggplot2::element_text(colour = TINTA, face = "bold", size = base + 2,
+                                         margin = ggplot2::margin(b = 4)),
+      plot.subtitle = ggplot2::element_text(colour = TINTA_2, size = base - 1,
+                                            margin = ggplot2::margin(b = 10)),
+      plot.caption  = ggplot2::element_text(colour = APAGADO, size = base - 3, hjust = 0),
+      legend.text   = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.title  = ggplot2::element_text(colour = TINTA_2, size = base - 2),
+      legend.key.size = grid::unit(0.45, "cm"),
+      strip.text = ggplot2::element_text(colour = TINTA, face = "bold", size = base - 2),
+      plot.title.position = "plot"
+    )
+}
+tema_mapa <- function(base = 12) {
+  tema_viz(base) + ggplot2::theme(
+    axis.text = ggplot2::element_blank(), axis.title = ggplot2::element_blank(),
+    axis.line = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_line(colour = REJILLA, linewidth = 0.2))
+}
+
+pct <- function(x, d = 1) paste0(sub("\\.", ",", sprintf(paste0("%.", d, "f"), 100 * x)), "%")
+mil <- function(x) format(round(x), big.mark = ".", decimal.mark = ",", trim = TRUE)
+num <- function(x, d = 2) sub("\\.", ",", sprintf(paste0("%.", d, "f"), x))
+
+# Banderas de disponibilidad, todas definidas de entrada para que ningún bloque
+# condicional quede sin su variable de control.
+HAY_LIMITES <- FALSE; HAY_CLIMA <- FALSE; HAY_FUTURO <- FALSE
+HAY_OCU <- FALSE; HAY_MODELOS <- FALSE; HAY_INVENTARIO <- FALSE
+
+# Colores y etiquetas de los cuatro SSP válidos en CMIP6. Definirlos para todos,
+# y no solo para los que hoy están en SSP_LISTA, evita que la escala se quede sin
+# valores si mañana se añade otro escenario.
+COL_SSP <- c("126" = PAL_CAT[3], "245" = PAL_CAT[4],
+             "370" = PAL_CAT[5], "585" = PAL_CAT[2])
+ETQ_SSP <- c("126" = "SSP1-2.6", "245" = "SSP2-4.5",
+             "370" = "SSP3-7.0", "585" = "SSP5-8.5")
+```
+
+```{r paquetes, include=FALSE}
+paquetes <- c("sf", "terra", "geodata", "dplyr", "tidyr", "ggplot2", "scales",
+              "ranger", "xgboost", "mgcv", "knitr", "jsonlite")
+faltantes <- paquetes[!paquetes %in% rownames(installed.packages())]
+if (length(faltantes) > 0) install.packages(faltantes, quiet = TRUE)
+invisible(lapply(paquetes, library, character.only = TRUE))
+
+terra::setGDALconfig("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
+terra::terraOptions(progress = 0)
+set.seed(2026)
+```
+
+```{r estructura, include=FALSE}
+RUTAS <- c("data/raw", "data/processed", "scripts",
+           "outputs/maps", "outputs/tables", "outputs/figures", "reports")
+invisible(lapply(RUTAS, dir.create, recursive = TRUE, showWarnings = FALSE))
+CACHE <- "data/raw"
+```
+
+```{r parametros, include=FALSE}
+# --- Área de estudio ---
+PAIS_ISO  <- "ECU"
+PROVINCIA <- "Manabí"
+
+# --- Clima ---
+RES_CLIMA <- 2.5           # minutos de arco (~4,6 km en el ecuador)
+SSP_LISTA <- c("126", "245", "585")
+# geodata/WorldClim solo publica estos tres periodos para CMIP6 descargado:
+PERIODOS  <- c("2021-2040", "2041-2060", "2061-2080")
+ETIQ_PER  <- c("2021-2040" = "~2030", "2041-2060" = "~2050", "2061-2080" = "~2070")
+# Dos GCM permiten una estimación mínima de dispersión entre modelos. Añadir más
+# nombres multiplica el volumen de descarga: cada combinación es un archivo.
+MODELOS_GCM <- c("MPI-ESM1-2-HR", "MIROC6")
+
+# --- Especies candidatas ---
+# Maderables documentadas para el bosque seco de la costa y plantación comercial
+# de Manabí. El código selecciona las cinco con más respaldo de ocurrencias.
+CANDIDATAS <- c(
+  "Cordia alliodora",        # Laurel
+  "Handroanthus chrysanthus",# Guayacán
+  "Ceiba trichistandra",     # Ceibo
+  "Loxopterygium huasango",  # Hualtaco
+  "Prosopis juliflora",      # Algarrobo
+  "Tectona grandis",         # Teca (plantación)
+  "Ochroma pyramidale",      # Balsa (plantación)
+  "Geoffroea spinosa",       # Almendro
+  "Caesalpinia glabrata",    # Charán
+  "Acacia macracantha",      # Faique
+  "Myroxylon peruiferum",    # Bálsamo
+  "Schinus molle"            # Molle
+)
+N_ESPECIES <- 5
+MIN_OCU    <- 25            # ocurrencias mínimas para modelar una especie
+
+# --- Modelación ---
+N_FONDO    <- 5000          # puntos de fondo (pseudo-ausencias)
+K_BLOQUES  <- 5             # pliegues de validación cruzada espacial
+LADO_BLOQUE <- 0.5          # grados; tamaño del bloque espacial
+N_ARBOLES  <- 700
+BUFFER_KM  <- 150           # halo alrededor de Manabí para calibrar
+
+# --- Dasometría ---
+DATASET_ENF  <- "442e07a0-4b6c-499f-a68d-706ed112c1ac"
+FACTOR_FORMA <- 0.65
+DMC          <- 60
+IC_ANUAL     <- 0.40
+```
+
+```{r cache, include=FALSE}
+en_cache <- function(nombre, expr, forzar = FALSE) {
+  ruta <- file.path(CACHE, paste0(nombre, ".rds"))
+  if (!forzar && file.exists(ruta)) {
+    message("[cache] ", nombre); return(readRDS(ruta))
+  }
+  message("[descarga] ", nombre)
+  val <- expr
+  if (!is.null(val)) saveRDS(val, ruta)
+  val
+}
+```
+
+# Resumen y alcance
+
+Este documento estima la **idoneidad climática actual y futura** de las principales
+especies maderables de Manabí bajo escenarios CMIP6, y complementa ese análisis con
+un **componente dasométrico** derivado del inventario forestal nacional.
+
+## Qué se estima y qué no
+
+Conviene fijar el alcance antes de los resultados, porque determina qué afirmaciones
+son defendibles.
+
+**Se estima con datos reales:**
+
+- Idoneidad climática por especie, en el presente y bajo tres escenarios de emisión
+  en tres horizontes temporales.
+- Superficie idónea por cantón y su variación proyectada.
+- Ranking de especies por pérdida o ganancia de área idónea.
+- Volumen comercial individual, relación altura-diámetro e incremento proyectado, a
+  partir de los árboles medidos por el inventario nacional.
+- Incertidumbre entre algoritmos, entre escenarios y entre modelos climáticos.
+
+- **Volumen potencial de madera comercial (m³)**, actual y proyectado, por especie y
+  escenario, combinando superficie idónea, cobertura arbórea satelital y rendimiento
+  por hectárea.
+
+**Se estima con supuestos explícitos, no como medición:**
+
+El volumen se obtiene encadenando superficie idónea, cobertura forestal real y
+rendimiento por hectárea. El último término apoya en un supuesto de densidad de
+fustes, porque la publicación abierta del inventario nacional es un registro de
+composición florística —un árbol testigo por especie y parcela— y no un censo. Ese
+supuesto se declara, se presenta como rango y se somete a análisis de sensibilidad.
+
+La consecuencia práctica: **el valor absoluto es un potencial condicionado, no
+existencias medidas**, mientras que el **cambio relativo entre escenarios sí es
+robusto**, porque los supuestos se cancelan en el cociente.
+
+**Lo que sigue sin ser estimable:**
+
+- Existencias reales en pie verificadas en campo. Para eso hace falta el inventario
+  completo del MAATE, con densidad por parcela y factores de expansión.
+- Un total provincial sumando especies: las áreas idóneas se solapan, de modo que las
+  cifras por especie son alternativas excluyentes, no componentes de un total.
+
+Donde falta el dato se indica explícitamente y se sustituye por un supuesto
+declarado, nunca por una cifra silenciosa.
+
+## Nota sobre el horizonte 2100
+
+El producto CMIP6 descargado por WorldClim publica tres ventanas de veinte años:
+2021-2040, 2041-2060 y 2061-2080. **No incluye 2081-2100.** El horizonte más lejano
+disponible es por tanto centrado en ~2070. Extrapolar más allá exigiría descargar
+datos CMIP6 crudos desde el Copernicus Climate Data Store o NASA NEX-GDDP, lo que
+requiere credenciales y un procesamiento que excede este documento.
+
+## Sobre los paquetes espaciales
+
+El análisis usa `sf` para vectores y `terra` para ráster. Se omite `raster`, que
+`terra` reemplaza y cuyo mantenimiento está en modo de retiro; mezclarlos en el mismo
+flujo introduce conversiones innecesarias. Los mapas se construyen con `ggplot2` en
+lugar de `tmap` para mantener un sistema visual único con el resto de figuras.
+
+---
+
+# Glosario
+
+Los términos técnicos que aparecen a lo largo del documento, en orden de aparición.
+
+| Término | Significado |
+|---|---|
+| **Dasometría** | Rama forestal que mide árboles y rodales: diámetro, altura, volumen. De *dasos* (bosque) y *metron* (medida). Aquí es todo lo que se calcula a partir de árboles medidos en campo. |
+| **DAP** | Diámetro a la altura del pecho, medido a 1,30 m del suelo. Es la medida estándar porque es rápida, repetible y se correlaciona con el volumen. |
+| **Fuste** | El tronco aprovechable, desde la base hasta donde empieza la copa. Es la parte que se convierte en tabla. |
+| **Altura comercial** | Longitud del fuste utilizable. Distinta de la altura total, que incluye la copa. |
+| **DMC** | Diámetro mínimo de corta. Umbral legal o técnico bajo el cual no se aprovecha un árbol. |
+| **Coeficiente mórfico** | Factor que corrige el volumen de un cilindro perfecto al volumen real del fuste, que se adelgaza hacia arriba. Vale entre 0,4 y 0,7 según especie. |
+| **Bioclimática** | Variable climática construida para tener sentido biológico, no meteorológico. Por ejemplo «precipitación del trimestre más seco» en vez de «lluvia del 3 de marzo». |
+| **SDM** | *Species Distribution Model*. Modelo que relaciona dónde se ha visto una especie con las condiciones ambientales de esos sitios. |
+| **Idoneidad** | Salida del SDM. Un número entre 0 y 1 que indica cuán parecidas son las condiciones de un lugar a aquellas donde la especie está documentada. |
+| **Puntos de fondo** | Localidades tomadas al azar en la región que describen el rango de condiciones disponibles. Sustituyen a las ausencias, que no existen registradas. |
+| **AUC** | Probabilidad de que el modelo dé mayor puntaje a un sitio con presencia que a uno de fondo. 0,5 es azar; 1 es perfecto. |
+| **TSS** | Sensibilidad más especificidad menos uno. Mide aciertos descontando los que se obtendrían por azar. |
+| **CMIP6** | Conjunto coordinado de simulaciones climáticas globales que alimenta los informes del IPCC. |
+| **SSP** | *Shared Socioeconomic Pathway*. Escenario de cómo evolucionan población, economía y emisiones. |
+| **GCM** | *Global Climate Model*. Cada uno de los modelos que simula el clima futuro. Distintos GCM dan resultados distintos: esa diferencia es incertidumbre. |
+
+---
+
+# Preguntas de método
+
+## ¿Por qué CMIP6 y no otra fuente climática?
+
+CMIP6 es el conjunto de simulaciones climáticas coordinado internacionalmente que
+sustenta el Sexto Informe de Evaluación del IPCC (Eyring et al., 2016). Se eligió por cuatro
+razones concretas.
+
+**Es el estándar vigente.** Su antecesor, CMIP5, alimentó el informe de 2014 y usa
+escenarios RCP, hoy superados. Publicar con CMIP5 en 2026 obligaría a justificar por
+qué se usa una generación anterior.
+
+**Sus escenarios son socioeconómicos, no solo de emisiones.** Un SSP describe una
+trayectoria de población, economía y tecnología, y de ahí deriva las emisiones
+(O'Neill et al., 2016). Eso permite ligar el resultado a decisiones de política, que es lo que
+interesa en una provincia con presión de cambio de uso del suelo.
+
+**Está reducido a escala y listo para usar.** WorldClim publica CMIP6 interpolado a
+resoluciones de hasta 30 segundos de arco y armonizado con el clima de referencia
+(Fick & Hijmans, 2017). Descargar CMIP6 crudo del Copernicus Climate Data Store daría celdas de
+100 a 250 km, inservibles para una provincia de 19.000 km².
+
+**Ofrece varios modelos con el mismo formato.** Poder correr dos o más GCM sin
+cambiar el código es lo que permite cuantificar la incertidumbre climática.
+
+La limitación conocida: la versión descargable de WorldClim llega hasta 2061-2080. El
+horizonte 2081-2100 existe en CMIP6 crudo, pero exige credenciales y un procesamiento
+que queda fuera de este documento.
+
+## ¿El SDM dice dónde estarán los árboles?
+
+No, y la distinción es la más importante del documento.
+
+El SDM responde: **¿dónde el clima futuro se parecerá al clima donde hoy vive la
+especie?** No responde dónde habrá árboles.
+
+Entre una cosa y la otra median tres filtros que el modelo no incorpora:
+
+**Dispersión.** Que un sitio se vuelva climáticamente apto no significa que la
+especie llegue. Las semillas se mueven metros o kilómetros por generación, no
+cientos.
+
+**Suelo, pendiente y uso.** Un píxel climáticamente idóneo puede ser un cultivo de
+maíz, un pastizal o una ciudad.
+
+**Inercia demográfica.** Un árbol adulto sobrevive décadas en condiciones que ya no
+permiten que sus plántulas prosperen. La pérdida de idoneidad aparece primero como
+falla de regeneración, no como mortalidad.
+
+La lectura correcta es por tanto: *si en 2070 se quiere plantar esta especie, ¿el
+clima de ese sitio se lo permitirá?* Es una pregunta de planificación forestal, no un
+pronóstico de distribución.
+
+## ¿Cómo se ajusta el modelo? ¿Cuál es la variable respuesta?
+
+La variable respuesta es **binaria**: vale 1 en los sitios donde la especie está
+documentada y 0 en los puntos de fondo.
+
+$$y_i = \begin{cases} 1 & \text{si en } i \text{ hay un registro de la especie} \\
+0 & \text{si } i \text{ es un punto de fondo} \end{cases}$$
+
+Las variables explicativas son las 19 bioclimáticas más dos derivadas, extraídas del
+ráster en las coordenadas de cada punto. El modelo aprende qué combinaciones de clima
+separan unos de otros, y devuelve para cualquier píxel una probabilidad entre 0 y 1.
+
+El flujo, de principio a fin:
+
+| Paso | Qué ocurre |
+|---|---|
+| 1. Presencias | Se descargan de GBIF los registros de la especie en Ecuador |
+| 2. Fondo | Se sortean 5.000 puntos al azar en la región de calibración |
+| 3. Extracción | A cada punto se le asigna el clima de su píxel |
+| 4. Partición | Los puntos se agrupan en bloques de 0,5° y se reparten en 5 pliegues |
+| 5. Ajuste | El algoritmo se entrena con 4 pliegues |
+| 6. Evaluación | Se predice sobre el pliegue reservado y se mide AUC y TSS |
+| 7. Repetición | Se rota el pliegue reservado 5 veces y se promedia |
+| 8. Modelo final | Se reajusta con todos los datos y se proyecta sobre el mapa |
+
+El paso 4 es el que da credibilidad al resultado. Los registros de GBIF se agrupan
+cerca de carreteras y ciudades; repartirlos al azar dejaría puntos vecinos a ambos
+lados de la partición y el modelo obtendría buenas notas simplemente por reconocer
+sitios que ya vio. Particionar por bloques geográficos lo obliga a acertar en zonas
+enteras que desconoce (Roberts et al., 2017).
+
+Los tres algoritmos resuelven el mismo problema con lógicas distintas:
+
+| Algoritmo | Cómo decide | Fortaleza | Debilidad |
+|---|---|---|---|
+| **Random Forest** | Promedia cientos de árboles de decisión sobre muestras distintas | Robusto, capta interacciones | No extrapola fuera del rango visto |
+| **XGBoost** | Añade árboles secuencialmente, cada uno corrigiendo el error del anterior | Suele dar la mejor precisión | Propenso a sobreajuste; no extrapola |
+| **GAM** | Ajusta una curva suave por variable y las suma | Interpretable, sí extrapola | Menos capaz con interacciones complejas |
+
+Esa diferencia en extrapolación explica el comportamiento de las proyecciones donde
+el clima futuro sale del rango de calibración, y se cuantifica más adelante.
+
+---
+
+# Datos
+
+## Estado de la caché
+
+Antes de pedir nada a la red conviene ver qué hay ya en disco. Cada descarga se
+guarda dos veces: `geodata` conserva el archivo crudo en `data/raw/` y no lo vuelve
+a solicitar si existe, y `en_cache()` guarda además el recorte sobre el área de
+estudio como `.rds`, que es lo que realmente se usa. Con cualquiera de las dos
+copias presentes, la corrida no toca la red.
+
+```{r estado-cache}
+combos_pre <- expand.grid(modelo = MODELOS_GCM, ssp = SSP_LISTA, periodo = PERIODOS,
+                          stringsAsFactors = FALSE)
+claves_cmip <- paste0("cmip6_", combos_pre$modelo, "_", combos_pre$ssp, "_",
+                      gsub("-", "", combos_pre$periodo), "_", RES_CLIMA)
+claves_ocu <- paste0("ocu_", gsub(" ", "_", CANDIDATAS))
+
+estado <- function(claves, etiqueta) {
+  rutas <- file.path(CACHE, paste0(claves, ".rds"))
+  hay <- file.exists(rutas)
+  mb <- sum(file.size(rutas[hay]), na.rm = TRUE) / 1024^2
+  data.frame(Conjunto = etiqueta, `En caché` = paste0(sum(hay), " / ", length(hay)),
+             `Tamaño (MB)` = num(mb, 1), check.names = FALSE)
+}
+
+tabla_cache <- rbind(
+  estado("gadm_ecu", "Límites administrativos (GADM)"),
+  estado(paste0("wc_bio_", RES_CLIMA), "Bioclimáticas actuales (WorldClim)"),
+  estado(claves_cmip, "Proyecciones climáticas (CMIP6)"),
+  estado(claves_ocu, "Ocurrencias por especie (GBIF)"),
+  estado("enf_medidas", "Inventario forestal nacional")
+)
+
+crudos <- list.files(CACHE, pattern = "\\.(tif|zip)$", recursive = TRUE,
+                     full.names = TRUE)
+mb_crudos <- sum(file.size(crudos), na.rm = TRUE) / 1024^2
+
+knitr::kable(tabla_cache, caption = "Contenido de la caché antes de ejecutar",
+             align = c("l", "r", "r"))
+```
+
+```{r nota-cache, results='asis'}
+n_falta <- sum(!file.exists(file.path(CACHE, paste0(
+  c("gadm_ecu", paste0("wc_bio_", RES_CLIMA), claves_cmip, claves_ocu,
+    "enf_medidas"), ".rds"))))
+
+if (n_falta == 0) {
+  cat("**Todo está en caché: esta corrida no descarga nada.** Además hay ",
+      num(mb_crudos, 0), " MB de archivos crudos en `", CACHE,
+      "`, que `geodata` reutiliza aunque se borraran los `.rds`.\n", sep = "")
+} else {
+  cat("Faltan ", n_falta, " conjuntos por descargar. El resto se reutiliza desde ",
+      "disco. Hay ", num(mb_crudos, 0), " MB de archivos crudos ya guardados en `",
+      CACHE, "`.\n", sep = "")
+}
+cat("\nPara forzar una descarga concreta, borrar su `.rds` en `", CACHE,
+    "`. Para liberar espacio conservando la capacidad de re-ejecutar, se pueden ",
+    "borrar los `.tif` y `.zip` crudos y dejar solo los `.rds`: son el recorte ",
+    "sobre el área y pesan una fracción mínima.\n", sep = "")
+```
+
+## Límites administrativos
+
+```{r limites}
+lim <- en_cache("gadm_ecu", {
+  p <- try(geodata::gadm(country = PAIS_ISO, level = 2, path = CACHE), silent = TRUE)
+  if (inherits(p, "try-error") || is.null(p)) NULL else sf::st_as_sf(p)
+})
+
+if (!is.null(lim)) {
+  nm1 <- intersect(c("NAME_1"), names(lim))
+  nm2 <- intersect(c("NAME_2"), names(lim))
+  if (length(nm1) && length(nm2)) {
+    lim <- lim |>
+      dplyr::rename(provincia = dplyr::all_of(nm1), canton = dplyr::all_of(nm2)) |>
+      dplyr::select(provincia, canton) |>
+      sf::st_make_valid()
+    manabi <- lim |> dplyr::filter(grepl("Manab", provincia, ignore.case = TRUE))
+    HAY_LIMITES <- nrow(manabi) > 0
+  }
+}
+```
+
+```{r limites-falla, eval=!HAY_LIMITES, results='asis'}
+cat("**No se pudieron descargar los límites administrativos (GADM).** Sin el ",
+    "polígono de Manabí el resto del análisis espacial no puede ejecutarse. ",
+    "Reintentar; si persiste, descargar manualmente el nivel 2 de Ecuador desde ",
+    "gadm.org y guardarlo como `data/raw/gadm_ecu.rds` en formato `sf`.\n", sep = "")
+```
+
+```{r limites-ok, eval=HAY_LIMITES}
+prov_union <- sf::st_union(manabi)
+# Halo de calibración: el modelo aprende mejor con el gradiente climático regional
+area_cal <- sf::st_buffer(sf::st_transform(prov_union, 32717), BUFFER_KM * 1000) |>
+  sf::st_transform(4326)
+
+knitr::kable(
+  data.frame(
+    Concepto = c("Provincia", "Cantones", "Superficie (km²)",
+                 "Halo de calibración (km)"),
+    Valor = c(PROVINCIA, nrow(manabi),
+              mil(as.numeric(sum(sf::st_area(manabi))) / 1e6), BUFFER_KM)
+  ),
+  caption = "Área de estudio", align = c("l", "r"))
+```
+
+```{r mapa-cantones, eval=HAY_LIMITES, fig.height=7}
+ctr <- sf::st_point_on_surface(manabi)
+ggplot() +
+  geom_sf(data = manabi, fill = VERDE[2], colour = EJE, linewidth = 0.3) +
+  geom_sf_text(data = ctr, aes(label = canton), size = 2.4, colour = TINTA) +
+  labs(title = "Cantones de Manabí",
+       subtitle = "Unidad de agregación de los resultados",
+       caption = "Límites: GADM nivel 2.") +
+  tema_mapa()
+```
+
+## Ocurrencias de especies
+
+Las presencias provienen de GBIF, restringidas a Ecuador continental y filtradas por
+calidad de coordenadas.
+
+```{r ocurrencias, eval=HAY_LIMITES}
+bajar_ocu <- function(nombre, limite = 2000) {
+  u <- paste0("https://api.gbif.org/v1/occurrence/search",
+              "?scientificName=", utils::URLencode(nombre, reserved = TRUE),
+              "&country=EC&hasCoordinate=true&hasGeospatialIssue=false",
+              "&limit=300&offset=")
+  acc <- list(); off <- 0
+  repeat {
+    r <- try(jsonlite::fromJSON(paste0(u, off), flatten = TRUE), silent = TRUE)
+    if (inherits(r, "try-error") || length(r$results) == 0) break
+    if (!is.data.frame(r$results) || nrow(r$results) == 0) break
+    cols <- c("decimalLatitude", "decimalLongitude", "year")
+    d <- r$results
+    for (cc in cols) if (!cc %in% names(d)) d[[cc]] <- NA
+    acc[[length(acc) + 1]] <- d[, cols, drop = FALSE]
+    off <- off + 300
+    if (isTRUE(r$endOfRecords) || off >= min(r$count, limite)) break
+  }
+  if (length(acc) == 0) return(NULL)
+  o <- do.call(rbind, acc)
+  o <- o[!is.na(o$decimalLatitude) & !is.na(o$decimalLongitude), , drop = FALSE]
+  if (nrow(o) == 0) return(NULL)
+  o$especie <- nombre
+  o
+}
+
+ocu_todas <- do.call(rbind, lapply(CANDIDATAS, function(sp) {
+  en_cache(paste0("ocu_", gsub(" ", "_", sp)), bajar_ocu(sp))
+}))
+
+HAY_OCU <- !is.null(ocu_todas) && nrow(ocu_todas) > 0
+```
+
+```{r especies-sel, eval=HAY_OCU}
+ocu_sf <- sf::st_as_sf(ocu_todas, coords = c("decimalLongitude", "decimalLatitude"),
+                       crs = 4326, remove = FALSE)
+
+# Se exige respaldo dentro del halo de calibración: una especie con muchas
+# ocurrencias en la Amazonía no informa sobre la costa.
+dentro <- lengths(sf::st_intersects(ocu_sf, area_cal)) > 0
+ocu_sf$en_area <- dentro
+
+respaldo <- ocu_sf |>
+  sf::st_drop_geometry() |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(total_ec = dplyr::n(), en_area = sum(en_area), .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(en_area))
+
+knitr::kable(
+  respaldo |> dplyr::transmute(
+    Especie = especie, `Ocurrencias en Ecuador` = mil(total_ec),
+    `Dentro del área de calibración` = mil(en_area)),
+  caption = "Respaldo de ocurrencias por especie candidata", align = c("l", "r", "r"))
+
+ESPECIES <- respaldo$especie[respaldo$en_area >= MIN_OCU][seq_len(N_ESPECIES)]
+ESPECIES <- ESPECIES[!is.na(ESPECIES)]
+HAY_OCU <- length(ESPECIES) >= 2
+```
+
+```{r especies-nota, eval=HAY_OCU, results='asis'}
+cat("Se modelan las ", length(ESPECIES), " especies con mayor respaldo dentro del ",
+    "área: **", paste(ESPECIES, collapse = "**, **"), "**.\n\n",
+    "La selección es empírica, no editorial: se ordena por número de ocurrencias ",
+    "verificadas en el área de calibración, que es lo que determina si un modelo de ",
+    "distribución puede ajustarse. Una especie comercialmente importante pero con ",
+    "pocos registros públicos queda fuera por limitación de dato, no por relevancia.\n",
+    sep = "")
+```
+
+```{r sin-especies, eval=!HAY_OCU, results='asis'}
+cat("No hay especies con respaldo suficiente de ocurrencias. Bajar `MIN_OCU` o ",
+    "ampliar `CANDIDATAS`.\n", sep = "")
+```
+
+## Clima actual
+
+```{r clima-actual, eval=HAY_LIMITES}
+bio_now <- en_cache(paste0("wc_bio_", RES_CLIMA), {
+  r <- try(geodata::worldclim_global(var = "bio", res = RES_CLIMA, path = CACHE),
+           silent = TRUE)
+  if (inherits(r, "try-error") || is.null(r)) NULL else terra::wrap(terra::crop(r, terra::ext(
+    as.numeric(sf::st_bbox(area_cal))[c(1,3,2,4)])))
+})
+
+if (!is.null(bio_now)) {
+  bio_now <- terra::unwrap(bio_now)
+  names(bio_now) <- paste0("bio", seq_len(terra::nlyr(bio_now)))
+  HAY_CLIMA <- terra::nlyr(bio_now) >= 19
+}
+```
+
+```{r clima-falla, eval=!HAY_CLIMA, results='asis'}
+cat("**No se pudieron descargar las variables bioclimáticas de WorldClim 2.1.** ",
+    "El análisis de idoneidad no puede continuar sin ellas.\n", sep = "")
+```
+
+```{r clima-deficit, eval=HAY_CLIMA}
+# Índice de aridez de De Martonne y un proxy de déficit hídrico estacional.
+# bio1 = temperatura media anual; bio12 = precipitación anual;
+# bio15 = estacionalidad de precipitación; bio17 = precipitación del trimestre seco.
+idx <- bio_now[[c("bio1", "bio12", "bio15", "bio17")]]
+aridez  <- idx$bio12 / (idx$bio1 + 10)
+names(aridez) <- "aridez"
+deficit <- idx$bio12 / 12 - idx$bio17 / 3   # mm/mes de contraste húmedo-seco
+names(deficit) <- "deficit"
+
+predictoras <- c(bio_now, aridez, deficit)
+VARS <- names(predictoras)
+```
+
+```{r tabla-bioclim, eval=HAY_CLIMA}
+knitr::kable(
+  data.frame(
+    Variable = c("bio1", "bio5", "bio6", "bio12", "bio15", "bio17", "aridez", "deficit"),
+    Descripción = c("Temperatura media anual", "Temperatura máxima del mes más cálido",
+                    "Temperatura mínima del mes más frío", "Precipitación anual",
+                    "Estacionalidad de la precipitación",
+                    "Precipitación del trimestre más seco",
+                    "Índice de aridez de De Martonne (P/(T+10))",
+                    "Contraste húmedo-seco (mm/mes)")
+  ),
+  caption = "Variables climáticas principales (el modelo usa las 19 bioclimáticas más las dos derivadas)",
+  align = c("l", "l"))
+```
+
+```{r mapa-ocurrencias, eval=HAY_OCU, fig.height=7}
+ocu_plot <- ocu_sf |> dplyr::filter(especie %in% ESPECIES, en_area)
+
+ggplot() +
+  geom_sf(data = sf::st_as_sf(area_cal), fill = "#f0efec", colour = EJE,
+          linewidth = 0.3) +
+  geom_sf(data = manabi, fill = VERDE[1], colour = EJE, linewidth = 0.25) +
+  geom_sf(data = ocu_plot, aes(colour = especie), size = 1.3, alpha = 0.8) +
+  scale_colour_manual(values = setNames(PAL_CAT[seq_along(ESPECIES)], ESPECIES),
+                      name = NULL) +
+  labs(title = "De dónde aprende el modelo",
+       subtitle = "Registros de presencia usados para calibrar, dentro del área de trabajo",
+       caption = "Gris: halo de calibración. Verde: provincia de Manabí.") +
+  tema_mapa() +
+  theme(legend.position = "top", legend.text = element_text(face = "italic", size = 7))
+```
+
+> **Qué muestra.** Cada punto es un lugar donde alguien registró la especie. El
+> modelo no ve el mapa: ve el clima de esos puntos. La concentración a lo largo de
+> vías y poblados es el sesgo de muestreo que se discute en la sección de
+> incertidumbre.
+
+## Clima futuro
+
+```{r clima-futuro, eval=HAY_CLIMA}
+combos <- expand.grid(modelo = MODELOS_GCM, ssp = SSP_LISTA, periodo = PERIODOS,
+                      stringsAsFactors = FALSE)
+
+bajar_fut <- function(modelo, ssp, periodo) {
+  r <- try(geodata::cmip6_world(model = modelo, ssp = ssp, time = periodo,
+                                var = "bioc", res = RES_CLIMA, path = CACHE),
+           silent = TRUE)
+  if (inherits(r, "try-error") || is.null(r)) return(NULL)
+  terra::wrap(terra::crop(r, terra::ext(as.numeric(sf::st_bbox(area_cal))[c(1,3,2,4)])))
+}
+
+futuros <- lapply(seq_len(nrow(combos)), function(i) {
+  k <- paste0("cmip6_", combos$modelo[i], "_", combos$ssp[i], "_",
+              gsub("-", "", combos$periodo[i]), "_", RES_CLIMA)
+  en_cache(k, bajar_fut(combos$modelo[i], combos$ssp[i], combos$periodo[i]))
+})
+names(futuros) <- paste(combos$modelo, combos$ssp, combos$periodo, sep = "|")
+futuros <- futuros[!vapply(futuros, is.null, logical(1))]
+
+HAY_FUTURO <- length(futuros) > 0
+```
+
+```{r futuro-nota, eval=HAY_CLIMA, results='asis'}
+cat("Se solicitaron ", nrow(combos), " combinaciones de modelo climático, escenario ",
+    "y periodo; se obtuvieron ", length(futuros), ".\n", sep = "")
+if (!HAY_FUTURO) {
+  cat("\nSin proyecciones climáticas no se puede evaluar el futuro. El análisis del ",
+      "presente sí continúa.\n", sep = "")
+}
+```
+
+```{r magnitud-cambio, eval=HAY_CLIMA && HAY_FUTURO, fig.height=5.2}
+# Cuánto cambia el clima en sí, antes de hablar de especies
+clima_hoy <- terra::crop(predictoras[[c("bio1", "bio12")]], terra::vect(manabi),
+                         mask = TRUE)
+base_cl <- c(bio1 = as.numeric(terra::global(clima_hoy$bio1, "mean", na.rm = TRUE)),
+             bio12 = as.numeric(terra::global(clima_hoy$bio12, "mean", na.rm = TRUE)))
+
+delta_cl <- do.call(rbind, lapply(names(futuros), function(k) {
+  fu <- terra::unwrap(futuros[[k]])
+  names(fu) <- paste0("bio", seq_len(terra::nlyr(fu)))
+  fc <- terra::crop(fu[[c("bio1", "bio12")]], terra::vect(manabi), mask = TRUE)
+  pr <- strsplit(k, "\\|")[[1]]
+  data.frame(modelo = pr[1], ssp = pr[2], periodo = pr[3],
+             d_temp = as.numeric(terra::global(fc$bio1, "mean", na.rm = TRUE)) - base_cl["bio1"],
+             d_prec = 100 * (as.numeric(terra::global(fc$bio12, "mean", na.rm = TRUE)) /
+                             base_cl["bio12"] - 1))
+}))
+
+dl <- delta_cl |>
+  dplyr::group_by(ssp, periodo) |>
+  dplyr::summarise(temp = mean(d_temp), prec = mean(d_prec), .groups = "drop") |>
+  dplyr::mutate(etq = ETIQ_PER[periodo])
+
+g_t <- ggplot(dl, aes(x = etq, y = temp, fill = ssp)) +
+  geom_col(position = "dodge", width = 0.7) +
+  geom_text(aes(label = paste0("+", num(temp, 1))), position = position_dodge(0.7),
+            vjust = -0.4, size = 3, colour = TINTA_2) +
+  scale_fill_manual(values = COL_SSP, labels = ETQ_SSP, name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.16))) +
+  labs(title = "Cuánto sube la temperatura en Manabí",
+       subtitle = "Diferencia respecto al clima actual, promedio provincial",
+       x = NULL, y = "°C") +
+  tema_viz() + theme(legend.position = "top")
+
+g_p <- ggplot(dl, aes(x = etq, y = prec, fill = ssp)) +
+  geom_hline(yintercept = 0, colour = EJE, linewidth = 0.4) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = COL_SSP, labels = ETQ_SSP, name = NULL) +
+  labs(title = "Y cuánto cambia la lluvia",
+       subtitle = "Variación porcentual de la precipitación anual",
+       x = NULL, y = "%") +
+  tema_viz() + theme(legend.position = "none")
+
+print(g_t); print(g_p)
+```
+
+> **Qué muestran.** Es el motor de todo lo que sigue: si el clima no cambiara, la
+> idoneidad tampoco. La temperatura sube en los tres escenarios y la diferencia entre
+> ellos se abre con el tiempo. La lluvia es más incierta, y esa incertidumbre importa
+> porque en bosque seco el agua manda más que el calor.
+
+## Inventario forestal nacional
+
+```{r inventario}
+URI_E <- "http://rs.iobis.org/obis/terms/ExtendedMeasurementOrFact"
+URI_T <- "http://rs.tdwg.org/dwc/terms/measurementType"
+URI_V <- "http://rs.tdwg.org/dwc/terms/measurementValue"
+
+med <- function(reg, tipo) {
+  ex <- reg$extensions[[URI_E]]
+  if (is.null(ex)) return(NA_real_)
+  for (m in ex) if (identical(m[[URI_T]], tipo)) {
+    v <- suppressWarnings(as.numeric(gsub(",", ".", m[[URI_V]])))
+    if (!is.na(v)) return(v)
+  }
+  NA_real_
+}
+cmp <- function(reg, nm) { v <- reg[[nm]]; if (is.null(v) || !length(v)) NA else as.character(v[[1]]) }
+
+bajar_enf <- function() {
+  u <- paste0("https://api.gbif.org/v1/occurrence/search?datasetKey=", DATASET_ENF,
+              "&hasCoordinate=true&hasGeospatialIssue=false&limit=300&offset=")
+  acc <- list(); off <- 0
+  repeat {
+    r <- jsonlite::fromJSON(paste0(u, off), simplifyVector = FALSE)
+    if (length(r$results) == 0) break
+    acc[[length(acc) + 1]] <- do.call(rbind, lapply(r$results, function(g) data.frame(
+      species = cmp(g, "species"), lat = suppressWarnings(as.numeric(cmp(g, "decimalLatitude"))),
+      lon = suppressWarnings(as.numeric(cmp(g, "decimalLongitude"))),
+      habitat = cmp(g, "habitat"), eventID = cmp(g, "eventID"),
+      dap = med(g, "dap"), hc = med(g, "altura_comercial_estimada"),
+      stringsAsFactors = FALSE)))
+    off <- off + 300
+    if (isTRUE(r$endOfRecords) || off >= r$count) break
+  }
+  do.call(rbind, acc)
+}
+
+enf <- en_cache("enf_medidas", bajar_enf())
+
+if (!is.null(enf)) {
+  enf <- enf |>
+    dplyr::filter(!is.na(dap), !is.na(hc), dap > 0, hc > 0) |>
+    dplyr::mutate(volumen = (pi/4) * (dap/100)^2 * hc * FACTOR_FORMA)
+  HAY_INVENTARIO <- nrow(enf) > 100
+}
+```
+
+---
+
+# Modelación de idoneidad climática
+
+## Diseño
+
+Se modela la **probabilidad de presencia** de cada especie en función del clima,
+usando presencias documentadas frente a puntos de fondo que caracterizan el rango de
+condiciones disponibles en la región.
+
+Tres decisiones metodológicas sostienen la validez de los resultados:
+
+**Fondo, no ausencia.** No existen registros fiables de ausencia, de modo que se
+usan puntos de fondo (*background*) muestreados sobre el área de calibración. La
+interpretación correcta de la salida es idoneidad relativa, no probabilidad absoluta
+de ocupación.
+
+**Validación cruzada espacial por bloques.** Las ocurrencias de GBIF están
+espacialmente agrupadas: dividir al azar dejaría puntos vecinos a ambos lados y
+produciría métricas infladas. Se particiona por bloques de `r LADO_BLOQUE`°, de modo
+que el modelo se evalúa sobre zonas geográficas que no vio.
+
+**Métricas apropiadas al tipo de respuesta.** Con una variable objetivo binaria, el
+AUC y el TSS son las medidas informativas. RMSE, MAE y R² se reportan sobre la
+probabilidad predicha porque fueron solicitados, pero sobre una respuesta 0/1 su
+interpretación es limitada: se incluyen por completitud, no como criterio de
+selección.
+
+```{r datos-modelo, eval=HAY_OCU && HAY_CLIMA}
+# Se trabaja directamente sobre el sfc: convertirlo a sf y renombrar la columna de
+# geometría es innecesario aquí y frágil entre versiones de sf.
+fondo <- sf::st_sample(area_cal, N_FONDO, type = "random")
+xy_fondo <- sf::st_coordinates(fondo)
+
+extraer_clima <- function(xy) {
+  # Con una matriz de coordenadas, terra::extract no admite el argumento ID:
+  # ese parámetro solo aplica cuando se extrae con un SpatVector.
+  v <- terra::extract(predictoras, xy)
+  v <- as.data.frame(v)
+  v[, setdiff(names(v), "ID"), drop = FALSE]
+}
+
+cl_fondo <- extraer_clima(xy_fondo)
+ok_f <- stats::complete.cases(cl_fondo)
+cl_fondo <- cl_fondo[ok_f, , drop = FALSE]
+xy_fondo <- xy_fondo[ok_f, , drop = FALSE]
+
+armar_datos <- function(sp) {
+  pres <- ocu_sf |> dplyr::filter(especie == sp, en_area)
+  xy_p <- sf::st_coordinates(pres)
+  # Una presencia por celda climática: evita duplicar el mismo píxel
+  cel <- terra::cellFromXY(predictoras, xy_p)
+  xy_p <- xy_p[!duplicated(cel) & !is.na(cel), , drop = FALSE]
+  if (nrow(xy_p) < MIN_OCU) return(NULL)
+
+  cl_p <- extraer_clima(xy_p)
+  ok <- stats::complete.cases(cl_p)
+  xy_p <- xy_p[ok, , drop = FALSE]; cl_p <- cl_p[ok, , drop = FALSE]
+  if (nrow(xy_p) < MIN_OCU) return(NULL)
+
+  d <- rbind(
+    data.frame(y = 1, x = xy_p[, 1], yc = xy_p[, 2], cl_p),
+    data.frame(y = 0, x = xy_fondo[, 1], yc = xy_fondo[, 2], cl_fondo)
+  )
+  d$bloque <- paste(floor(d$x / LADO_BLOQUE), floor(d$yc / LADO_BLOQUE), sep = "_")
+  d
+}
+
+datos_sp <- lapply(ESPECIES, armar_datos)
+names(datos_sp) <- ESPECIES
+datos_sp <- datos_sp[!vapply(datos_sp, is.null, logical(1))]
+ESPECIES <- names(datos_sp)
+HAY_MODELOS <- length(ESPECIES) >= 1
+```
+
+## Algoritmos y validación
+
+```{r funciones-modelo, eval=HAY_MODELOS}
+auc <- function(obs, p) {
+  n1 <- sum(obs == 1); n0 <- sum(obs == 0)
+  if (n1 == 0 || n0 == 0) return(NA_real_)
+  r <- rank(p, ties.method = "average")
+  (sum(r[obs == 1]) - n1 * (n1 + 1) / 2) / (n1 * n0)
+}
+tss <- function(obs, p) {
+  cortes <- stats::quantile(p, seq(0.05, 0.95, by = 0.05), na.rm = TRUE)
+  max(vapply(cortes, function(u) {
+    se <- mean(p[obs == 1] >= u); sp <- mean(p[obs == 0] < u); se + sp - 1
+  }, numeric(1)), na.rm = TRUE)
+}
+metricas <- function(obs, p) {
+  data.frame(AUC = auc(obs, p), TSS = tss(obs, p),
+             RMSE = sqrt(mean((obs - p)^2)), MAE = mean(abs(obs - p)),
+             R2 = 1 - sum((obs - p)^2) / sum((obs - mean(obs))^2))
+}
+
+# Umbral que maximiza sensibilidad + especificidad. Un corte fijo en 0,5 no sirve
+# aquí: con miles de puntos de fondo frente a unos cientos de presencias, el modelo
+# devuelve probabilidades bajas en todo el dominio y ningún píxel superaría 0,5.
+umbral_de <- function(obs, p) {
+  cortes <- unique(stats::quantile(p, seq(0.01, 0.99, by = 0.01), na.rm = TRUE))
+  if (length(cortes) < 2) return(stats::median(p, na.rm = TRUE))
+  v <- vapply(cortes, function(u) {
+    mean(p[obs == 1] >= u) + mean(p[obs == 0] < u) - 1
+  }, numeric(1))
+  as.numeric(cortes[which.max(v)])
+}
+
+ajustar <- function(algo, tr, vars) {
+  f <- stats::as.formula(paste("y ~", paste(vars, collapse = " + ")))
+  if (algo == "Random Forest") {
+    # ranger con probability = TRUE exige respuesta de tipo factor; con 0/1
+    # numérico falla, y el error quedaría oculto tras el try() del evaluador.
+    tr2 <- tr
+    tr2$y <- factor(tr2$y, levels = c(0, 1))
+    ranger::ranger(f, data = tr2, num.trees = N_ARBOLES, probability = TRUE,
+                   seed = 2026)
+  } else if (algo == "XGBoost") {
+    # xgb.train sobre xgb.DMatrix: interfaz estable entre versiones mayores,
+    # a diferencia de xgboost(), cuya firma cambió en la serie 3.x
+    dm <- xgboost::xgb.DMatrix(data = as.matrix(tr[, vars]), label = tr$y)
+    xgboost::xgb.train(
+      params = list(max_depth = 5, eta = 0.08, subsample = 0.8,
+                    colsample_bytree = 0.8, objective = "binary:logistic",
+                    nthread = 2),
+      data = dm, nrounds = 250, verbose = 0)
+  } else {
+    # GAM con suavizados de bajo grado para evitar sobreajuste con pocas presencias
+    vs <- paste0("s(", vars, ", k = 4)", collapse = " + ")
+    mgcv::gam(stats::as.formula(paste("y ~", vs)), data = tr,
+              family = stats::binomial(), select = TRUE, method = "REML")
+  }
+}
+predecir <- function(m, nd, vars) {
+  if (inherits(m, "ranger")) stats::predict(m, data = nd)$predictions[, "1"]
+  else if (inherits(m, "xgb.Booster"))
+    as.numeric(stats::predict(m, xgboost::xgb.DMatrix(as.matrix(nd[, vars]))))
+  else as.numeric(stats::predict(m, newdata = nd, type = "response"))
+}
+```
+
+```{r cv-espacial, eval=HAY_MODELOS}
+ALGOS <- c("Random Forest", "XGBoost", "GAM")
+# El GAM con 21 suavizados y pocas presencias es inestable: se le da un subconjunto
+VARS_GAM <- c("bio1", "bio5", "bio6", "bio12", "bio15", "bio17", "aridez", "deficit")
+
+evaluar_sp <- function(sp) {
+  d <- datos_sp[[sp]]
+  bl <- unique(d$bloque)
+  pliegue <- setNames(sample(rep_len(seq_len(K_BLOQUES), length(bl))), bl)
+  d$fold <- pliegue[d$bloque]
+
+  do.call(rbind, lapply(ALGOS, function(a) {
+    vs <- if (a == "GAM") VARS_GAM else VARS
+    res <- do.call(rbind, lapply(seq_len(K_BLOQUES), function(k) {
+      tr <- d[d$fold != k, ]; te <- d[d$fold == k, ]
+      if (sum(tr$y) < 5 || sum(te$y) < 3) return(NULL)
+      m <- try(ajustar(a, tr, vs), silent = TRUE)
+      if (inherits(m, "try-error")) return(NULL)
+      p <- try(predecir(m, te, vs), silent = TRUE)
+      if (inherits(p, "try-error")) return(NULL)
+      metricas(te$y, p)
+    }))
+    if (is.null(res)) return(NULL)
+    cbind(especie = sp, algoritmo = a,
+          as.data.frame(lapply(res, function(z) mean(z, na.rm = TRUE))))
+  }))
+}
+
+desempeno <- do.call(rbind, lapply(ESPECIES, evaluar_sp))
+HAY_MODELOS <- !is.null(desempeno) && nrow(desempeno) > 0
+```
+
+```{r tabla-desempeno, eval=HAY_MODELOS}
+desempeno |>
+  dplyr::transmute(Especie = especie, Algoritmo = algoritmo,
+                   AUC = num(AUC, 3), TSS = num(TSS, 3),
+                   RMSE = num(RMSE, 3), MAE = num(MAE, 3), R2 = num(R2, 3)) |>
+  knitr::kable(caption = paste0("Desempeño con validación cruzada espacial (",
+                                K_BLOQUES, " pliegues por bloques de ",
+                                LADO_BLOQUE, "°)"),
+               align = c("l", "l", rep("r", 5)))
+```
+
+```{r graf-desempeno, eval=HAY_MODELOS, fig.height=5}
+ggplot(desempeno, aes(x = AUC, y = especie, colour = algoritmo)) +
+  geom_vline(xintercept = 0.5, colour = ALERTA, linetype = "22", linewidth = 0.4) +
+  geom_point(size = 3, alpha = 0.85) +
+  scale_colour_manual(values = setNames(PAL_CAT[1:3], ALGOS), name = NULL) +
+  labs(title = "Comparación de algoritmos por especie",
+       subtitle = "AUC bajo validación cruzada espacial. La línea roja marca el azar.",
+       x = "AUC", y = NULL) +
+  tema_viz() +
+  theme(legend.position = "top", axis.text.y = element_text(face = "italic"),
+        panel.grid.major.y = element_blank())
+```
+
+> **Cómo leerlo.** Cada punto es un algoritmo evaluado en zonas que no vio al
+> entrenar. Bajo 0,70 el modelo apenas distingue presencia de fondo y su proyección no
+> sostiene conclusiones, por precisa que parezca la cifra.
+
+```{r auc-tss, eval=HAY_MODELOS, fig.height=5}
+ggplot(desempeno, aes(x = AUC, y = TSS, colour = algoritmo, shape = algoritmo)) +
+  annotate("rect", xmin = 0.75, xmax = Inf, ymin = 0.4, ymax = Inf,
+           fill = VERDE[2], alpha = 0.35) +
+  annotate("text", x = 0.755, y = Inf, vjust = 1.6, hjust = 0,
+           label = "zona aceptable", colour = TINTA_2, size = 3.1) +
+  geom_vline(xintercept = 0.7, colour = ALERTA, linetype = "22", linewidth = 0.4) +
+  geom_point(size = 3.2, alpha = 0.9) +
+  scale_colour_manual(values = setNames(PAL_CAT[1:3], ALGOS), name = NULL) +
+  scale_shape_manual(values = c(16, 17, 15), name = NULL) +
+  labs(title = "Las dos métricas a la vez",
+       subtitle = "Cada punto es una combinación de especie y algoritmo",
+       caption = "Línea roja: AUC 0,70, bajo el cual el modelo apenas distingue presencia de fondo.",
+       x = "AUC", y = "TSS") +
+  tema_viz() + theme(legend.position = "top")
+```
+
+> **Qué muestra.** AUC y TSS miden cosas parecidas pero no idénticas: un modelo puede
+> ordenar bien los sitios (AUC alto) y aun así fallar al fijar un corte (TSS bajo).
+> Los puntos fuera del recuadro verde corresponden a especies cuyas proyecciones no
+> deben presentarse como conclusión.
+
+```{r mejor-algo, eval=HAY_MODELOS, results='asis'}
+ranking <- desempeno |>
+  dplyr::group_by(algoritmo) |>
+  dplyr::summarise(AUC = mean(AUC, na.rm = TRUE), TSS = mean(TSS, na.rm = TRUE),
+                   .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(AUC))
+MEJOR <- ranking$algoritmo[1]
+
+cat("El algoritmo con mejor desempeño medio es **", MEJOR, "** (AUC = ",
+    num(ranking$AUC[1], 3), ", TSS = ", num(ranking$TSS[1], 3),
+    "). Se usa para los mapas de idoneidad; los otros dos se conservan para ",
+    "cuantificar la incertidumbre entre algoritmos.\n", sep = "")
+```
+
+---
+
+# Idoneidad actual
+
+```{r proyectar-actual, eval=HAY_MODELOS}
+modelos_full <- lapply(ESPECIES, function(sp) {
+  d <- datos_sp[[sp]]
+  setNames(lapply(ALGOS, function(a) {
+    vs <- if (a == "GAM") VARS_GAM else VARS
+    m <- try(ajustar(a, d, vs), silent = TRUE)
+    if (inherits(m, "try-error")) NULL else m
+  }), ALGOS)
+})
+names(modelos_full) <- ESPECIES
+
+# Malla de predicción sobre Manabí
+malla <- terra::crop(predictoras, terra::vect(manabi), mask = TRUE)
+mdf <- as.data.frame(malla, xy = TRUE, na.rm = TRUE)
+ok_m <- stats::complete.cases(mdf[, VARS])
+mdf <- mdf[ok_m, , drop = FALSE]
+
+idon_actual <- do.call(rbind, lapply(ESPECIES, function(sp) {
+  m <- modelos_full[[sp]][[MEJOR]]
+  if (is.null(m)) return(NULL)
+  vs <- if (MEJOR == "GAM") VARS_GAM else VARS
+  p <- try(predecir(m, mdf, vs), silent = TRUE)
+  if (inherits(p, "try-error")) return(NULL)
+  data.frame(x = mdf$x, y = mdf$y, especie = sp, idoneidad = as.numeric(p))
+}))
+
+# Identificador de celda sobre una malla de referencia única. Cruzar dos rásteres
+# por sus coordenadas en punto flotante falla en silencio: basta una diferencia
+# mínima de extensión tras recortar para que el cruce devuelva cero filas.
+MALLA_REF <- malla[[1]]
+celda_de <- function(d) terra::cellFromXY(MALLA_REF, as.matrix(d[, c("x", "y")]))
+if (!is.null(idon_actual)) idon_actual$celda <- celda_de(idon_actual)
+HAY_MODELOS <- !is.null(idon_actual) && nrow(idon_actual) > 0
+```
+
+```{r mapa-idoneidad, eval=HAY_MODELOS, fig.height=7.5}
+ggplot(idon_actual, aes(x = x, y = y, fill = idoneidad)) +
+  geom_raster() +
+  facet_wrap(~ especie, ncol = 3) +
+  geom_sf(data = manabi, inherit.aes = FALSE, fill = NA, colour = TINTA_2,
+          linewidth = 0.2) +
+  scale_fill_gradientn(colours = VERDE, limits = c(0, 1), name = "Idoneidad") +
+  coord_sf(expand = FALSE) +
+  labs(title = "Idoneidad climática actual por especie",
+       subtitle = paste0("Predicción del modelo ", MEJOR, " sobre clima WorldClim 2.1"),
+       caption = "Idoneidad relativa frente a las condiciones disponibles en la región, no probabilidad de ocupación.") +
+  tema_mapa() +
+  theme(strip.text = element_text(face = "bold.italic", size = 8))
+```
+
+> **Qué muestra.** Verde intenso: el clima de ese píxel se parece al de los sitios
+> donde la especie está documentada. No dice que haya árboles ahí, ni que vayan a
+> llegar: dice que el clima no sería el impedimento.
+
+```{r importancia-vars, eval=HAY_MODELOS, fig.height=5.5}
+imp <- do.call(rbind, lapply(ESPECIES, function(sp) {
+  m <- modelos_full[[sp]][["Random Forest"]]
+  if (is.null(m)) return(NULL)
+  mi <- try(ranger::ranger(
+    stats::as.formula(paste("y ~", paste(VARS, collapse = " + "))),
+    data = datos_sp[[sp]], num.trees = 300, importance = "permutation",
+    probability = TRUE, seed = 1), silent = TRUE)
+  if (inherits(mi, "try-error")) return(NULL)
+  v <- ranger::importance(mi)
+  data.frame(especie = sp, variable = names(v), importancia = as.numeric(v))
+}))
+
+if (!is.null(imp)) {
+  top_v <- imp |> dplyr::group_by(variable) |>
+    dplyr::summarise(m = mean(importancia), .groups = "drop") |>
+    dplyr::arrange(dplyr::desc(m)) |> head(10) |> dplyr::pull(variable)
+  print(ggplot(dplyr::filter(imp, variable %in% top_v),
+               aes(x = importancia, y = reorder(variable, importancia), fill = especie)) +
+    geom_col(position = "dodge", width = 0.75) +
+    scale_fill_manual(values = setNames(PAL_CAT[seq_along(ESPECIES)], ESPECIES),
+                      name = NULL) +
+    labs(title = "Variables climáticas que más discriminan",
+         subtitle = "Importancia por permutación, Random Forest",
+         x = "Importancia", y = NULL) +
+    tema_viz() +
+    theme(legend.position = "top", legend.text = element_text(face = "italic", size = 7),
+          panel.grid.major.y = element_blank()))
+}
+```
+
+> **Qué muestra.** Cuánto empeora el modelo si se desordena esa variable. Barra larga
+> significa que el modelo depende de ella. Que dominen las variables de lluvia y no
+> las de temperatura es coherente con bosque seco: ahí el factor limitante es el agua.
+
+## Cómo responde el modelo a cada variable
+
+Un modelo de este tipo suele quedarse en caja negra. Las curvas siguientes la abren:
+muestran qué idoneidad predice el modelo al mover **una variable** mientras las demás
+se fijan en su valor mediano.
+
+```{r curvas-respuesta, eval=HAY_MODELOS, fig.height=6.4}
+VARS_CURVA <- c("bio1", "bio12", "bio17", "aridez")
+NOM_VAR <- c(bio1 = "Temperatura media (°C)",
+             bio12 = "Precipitación anual (mm)",
+             bio17 = "Lluvia del trimestre seco (mm)",
+             aridez = "Índice de aridez")
+
+curvas <- do.call(rbind, lapply(ESPECIES, function(sp) {
+  m <- modelos_full[[sp]][[MEJOR]]
+  if (is.null(m)) return(NULL)
+  vs <- if (MEJOR == "GAM") VARS_GAM else VARS
+  d <- datos_sp[[sp]]
+  medianas <- lapply(vs, function(v) stats::median(d[[v]], na.rm = TRUE))
+  names(medianas) <- vs
+
+  do.call(rbind, lapply(intersect(VARS_CURVA, vs), function(v) {
+    rango <- stats::quantile(d[[v]][d$y == 1], c(0.02, 0.98), na.rm = TRUE)
+    sec <- seq(rango[1], rango[2], length.out = 60)
+    nd <- as.data.frame(medianas)[rep(1, length(sec)), , drop = FALSE]
+    nd[[v]] <- sec
+    p <- try(predecir(m, nd, vs), silent = TRUE)
+    if (inherits(p, "try-error")) return(NULL)
+    data.frame(especie = sp, variable = v, x = sec, idoneidad = as.numeric(p))
+  }))
+}))
+
+if (!is.null(curvas) && nrow(curvas) > 0) {
+  curvas$variable <- factor(NOM_VAR[curvas$variable], levels = unname(NOM_VAR))
+  print(ggplot(curvas, aes(x = x, y = idoneidad, colour = especie)) +
+    geom_line(linewidth = 0.9) +
+    facet_wrap(~ variable, scales = "free_x", ncol = 2) +
+    scale_colour_manual(values = setNames(PAL_CAT[seq_along(ESPECIES)], ESPECIES),
+                        name = NULL) +
+    labs(title = "Qué clima prefiere cada especie",
+         subtitle = "Idoneidad predicha al variar un factor, con los demás en su valor mediano",
+         x = NULL, y = "Idoneidad") +
+    tema_viz() +
+    theme(legend.position = "top",
+          legend.text = element_text(face = "italic", size = 7)))
+}
+```
+
+> **Cómo leerlas.** Una curva que sube indica que más de esa variable favorece a la
+> especie; una campana señala un óptimo intermedio; una línea plana significa que el
+> modelo no usa esa variable para decidir. Los escalones bruscos son la firma de los
+> modelos de árboles, que parten el rango en tramos en vez de suavizar.
+
+---
+
+# Proyecciones futuras
+
+```{r proyectar-futuro, eval=HAY_MODELOS && HAY_FUTURO}
+proyectar_escenario <- function(clave) {
+  fu <- terra::unwrap(futuros[[clave]])
+  names(fu) <- paste0("bio", seq_len(terra::nlyr(fu)))
+  ar <- fu$bio12 / (fu$bio1 + 10); names(ar) <- "aridez"
+  df_ <- fu$bio12 / 12 - fu$bio17 / 3; names(df_) <- "deficit"
+  capas <- c(fu, ar, df_)
+  capas <- terra::crop(capas, terra::vect(manabi), mask = TRUE)
+
+  d <- as.data.frame(capas, xy = TRUE, na.rm = TRUE)
+  d <- d[stats::complete.cases(d[, VARS]), , drop = FALSE]
+  if (nrow(d) == 0) return(NULL)
+
+  partes <- strsplit(clave, "\\|")[[1]]
+  do.call(rbind, lapply(ESPECIES, function(sp) {
+    m <- modelos_full[[sp]][[MEJOR]]
+    if (is.null(m)) return(NULL)
+    vs <- if (MEJOR == "GAM") VARS_GAM else VARS
+    p <- try(predecir(m, d, vs), silent = TRUE)
+    if (inherits(p, "try-error")) return(NULL)
+    data.frame(x = d$x, y = d$y, especie = sp, idoneidad = as.numeric(p),
+               modelo = partes[1], ssp = partes[2], periodo = partes[3])
+  }))
+}
+
+idon_fut <- do.call(rbind, lapply(names(futuros), function(k) {
+  r <- try(en_cache(paste0("idon_", gsub("[|-]", "_", k), "_", MEJOR),
+                    proyectar_escenario(k)), silent = TRUE)
+  if (inherits(r, "try-error")) NULL else r
+}))
+HAY_FUTURO <- !is.null(idon_fut) && nrow(idon_fut) > 0
+if (HAY_FUTURO) idon_fut$celda <- celda_de(idon_fut)
+```
+
+```{r umbrales, eval=HAY_MODELOS}
+# Umbral propio de cada especie, calculado sobre sus datos de calibración
+UMBRALES <- vapply(ESPECIES, function(sp) {
+  m <- modelos_full[[sp]][[MEJOR]]
+  if (is.null(m)) return(NA_real_)
+  vs <- if (MEJOR == "GAM") VARS_GAM else VARS
+  p <- try(predecir(m, datos_sp[[sp]], vs), silent = TRUE)
+  if (inherits(p, "try-error")) return(NA_real_)
+  umbral_de(datos_sp[[sp]]$y, p)
+}, numeric(1))
+
+knitr::kable(
+  data.frame(Especie = names(UMBRALES),
+             `Umbral de idoneidad` = num(UMBRALES, 3),
+             check.names = FALSE),
+  caption = "Umbral que maximiza sensibilidad más especificidad, por especie",
+  align = c("l", "r"))
+```
+
+```{r resumen-futuro, eval=HAY_MODELOS && HAY_FUTURO}
+base_area <- idon_actual |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(
+    px_actual  = sum(idoneidad >= UMBRALES[dplyr::first(especie)], na.rm = TRUE),
+    idon_actual = mean(idoneidad, na.rm = TRUE), .groups = "drop")
+
+fut_area <- idon_fut |>
+  dplyr::group_by(especie, ssp, periodo, modelo) |>
+  dplyr::summarise(
+    px = sum(idoneidad >= UMBRALES[dplyr::first(especie)], na.rm = TRUE),
+    idon = mean(idoneidad, na.rm = TRUE), .groups = "drop") |>
+  dplyr::group_by(especie, ssp, periodo) |>
+  dplyr::summarise(px_fut = mean(px), idon_media = mean(idon), .groups = "drop") |>
+  dplyr::inner_join(base_area, by = "especie") |>
+  dplyr::mutate(
+    cambio_area = (px_fut - px_actual) / pmax(px_actual, 1),
+    cambio_idon = (idon_media - idon_actual) / pmax(idon_actual, 1e-6),
+    delta_idon  = idon_media - idon_actual,
+    etiqueta = ETIQ_PER[periodo])
+```
+
+La métrica principal pasa a ser el **cambio de idoneidad media**, una magnitud
+continua. El área sobre el umbral se conserva como medida secundaria porque es más
+intuitiva, pero depende de dónde se ponga el corte y por eso no debe conducir la
+lectura.
+
+```{r graf-futuro, eval=HAY_MODELOS && HAY_FUTURO, fig.height=6}
+ggplot(fut_area, aes(x = etiqueta, y = cambio_idon, colour = ssp, group = ssp)) +
+  geom_hline(yintercept = 0, colour = EJE, linewidth = 0.4) +
+  geom_line(linewidth = 0.9) + geom_point(size = 2.4) +
+  facet_wrap(~ especie, ncol = 3, scales = "free_y") +
+  scale_colour_manual(values = COL_SSP, labels = ETQ_SSP, name = NULL) +
+  scale_y_continuous(labels = function(v) pct(v, 0)) +
+  labs(title = "Cambio proyectado de la idoneidad climática media",
+       subtitle = paste0("Respecto al presente, promediado sobre ",
+                         length(MODELOS_GCM), " modelos climáticos. ",
+                         "Cada panel tiene su propia escala."),
+       caption = "El periodo más lejano disponible en WorldClim-CMIP6 es 2061-2080.",
+       x = NULL, y = "Cambio relativo de idoneidad") +
+  tema_viz() +
+  theme(legend.position = "top", strip.text = element_text(face = "bold.italic", size = 8))
+```
+
+```{r mapa-futuro, eval=HAY_MODELOS && HAY_FUTURO, fig.height=7.5}
+per_lejano <- PERIODOS[length(PERIODOS)]
+comp <- idon_fut |>
+  dplyr::filter(periodo == per_lejano, ssp == "585") |>
+  dplyr::group_by(celda, especie) |>
+  dplyr::summarise(fut = mean(idoneidad), .groups = "drop") |>
+  dplyr::inner_join(dplyr::select(idon_actual, celda, especie, x, y, idoneidad),
+                    by = c("celda", "especie")) |>
+  dplyr::mutate(delta = fut - idoneidad)
+
+if (nrow(comp) > 0) {
+  lim_d <- max(abs(comp$delta), na.rm = TRUE)
+  print(ggplot(comp, aes(x = x, y = y, fill = delta)) +
+    geom_raster() +
+    facet_wrap(~ especie, ncol = 3) +
+    geom_sf(data = manabi, inherit.aes = FALSE, fill = NA, colour = TINTA_2,
+            linewidth = 0.2) +
+    scale_fill_gradientn(colours = DIVERG, limits = c(-lim_d, lim_d),
+                         name = "Δ idoneidad") +
+    coord_sf(expand = FALSE) +
+    labs(title = paste0("Cambio de idoneidad hacia ", ETIQ_PER[per_lejano],
+                        " bajo SSP5-8.5"),
+         subtitle = "Rojo: pérdida de aptitud climática. Azul: ganancia.",
+         caption = "Diferencia respecto al clima actual, promediada entre modelos climáticos.") +
+    tema_mapa() +
+    theme(strip.text = element_text(face = "bold.italic", size = 8)))
+}
+```
+
+> **Qué muestra.** Rojo: el clima de 2070 se aleja del que la especie tolera. Azul: se
+> acerca. Es el mapa de decisión a largo plazo — plantar hoy en una zona roja es
+> apostar contra la tendencia.
+
+## Ranking de sensibilidad climática
+
+```{r ranking-especies, eval=HAY_MODELOS && HAY_FUTURO}
+sens <- fut_area |>
+  dplyr::filter(periodo == per_lejano) |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(
+    `SSP1-2.6` = cambio_idon[ssp == "126"][1],
+    `SSP2-4.5` = cambio_idon[ssp == "245"][1],
+    `SSP5-8.5` = cambio_idon[ssp == "585"][1],
+    area585    = cambio_area[ssp == "585"][1],
+    .groups = "drop") |>
+  dplyr::arrange(`SSP5-8.5`)
+
+auc_sp <- desempeno |>
+  dplyr::filter(algoritmo == MEJOR) |>
+  dplyr::select(especie, AUC)
+
+sens |>
+  dplyr::left_join(auc_sp, by = "especie") |>
+  dplyr::transmute(Especie = especie,
+                   `SSP1-2.6` = pct(`SSP1-2.6`, 1),
+                   `SSP2-4.5` = pct(`SSP2-4.5`, 1),
+                   `SSP5-8.5` = pct(`SSP5-8.5`, 1),
+                   `Área SSP5-8.5` = pct(area585, 1),
+                   `AUC del modelo` = num(AUC, 3),
+                   Fiabilidad = ifelse(is.na(AUC), "—",
+                                ifelse(AUC >= 0.75, "Aceptable",
+                                ifelse(AUC >= 0.70, "Marginal", "Insuficiente")))) |>
+  knitr::kable(caption = paste0("Cambio de idoneidad hacia ", ETIQ_PER[per_lejano],
+                                ", de mayor a menor pérdida"),
+               align = c("l", rep("r", 5), "l"))
+```
+
+```{r lectura-sens, eval=HAY_MODELOS && HAY_FUTURO, results='asis'}
+peor <- sens$especie[1]; mejor_sp <- sens$especie[nrow(sens)]
+cat("La especie más sensible es **", peor, "**, con ", pct(sens$`SSP5-8.5`[1], 1),
+    " de cambio en idoneidad media bajo el escenario de altas emisiones. La menos ",
+    "afectada es **", mejor_sp, "** (", pct(sens$`SSP5-8.5`[nrow(sens)], 1), ").\n\n",
+    "La columna de fiabilidad de la tabla anterior debe filtrar esta lectura: un AUC ",
+    "bajo 0,70 significa que el modelo apenas distingue presencia de fondo, y en ese ",
+    "caso su proyección no sostiene ninguna conclusión por mucho que la cifra ",
+    "parezca precisa.\n\n",
+    "Una advertencia de interpretación: estos modelos describen el **nicho ",
+    "climático**, no la respuesta fisiológica ni la capacidad de dispersión. Un árbol ",
+    "adulto puede sobrevivir décadas en un sitio que ha dejado de ser idóneo para el ",
+    "establecimiento de plántulas. La pérdida de idoneidad anticipa problemas de ",
+    "regeneración antes que mortalidad inmediata, y esa distinción importa para ",
+    "decidir plantaciones a turno largo.\n", sep = "")
+```
+
+## Todo el panorama en una imagen
+
+```{r heatmap-escenarios, eval=HAY_MODELOS && HAY_FUTURO, fig.height=5.4}
+hm <- fut_area |>
+  dplyr::mutate(esc = ETQ_SSP[ssp], per = ETIQ_PER[periodo]) |>
+  dplyr::mutate(per = factor(per, levels = unname(ETIQ_PER)))
+
+lim_h <- max(abs(hm$cambio_idon), na.rm = TRUE)
+
+ggplot(hm, aes(x = per, y = esc, fill = cambio_idon)) +
+  geom_tile(colour = LIENZO, linewidth = 2) +
+  geom_text(aes(label = pct(cambio_idon, 0),
+                colour = abs(cambio_idon) > lim_h * 0.55), size = 3.1,
+            fontface = "bold") +
+  facet_wrap(~ especie, ncol = 3) +
+  scale_fill_gradientn(colours = DIVERG, limits = c(-lim_h, lim_h),
+                       name = "Cambio") +
+  scale_colour_manual(values = c(`TRUE` = "#ffffff", `FALSE` = TINTA),
+                      guide = "none") +
+  labs(title = "Cambio de idoneidad: todas las especies, escenarios y horizontes",
+       subtitle = "Rojo: pierde aptitud climática. Azul: gana.",
+       x = NULL, y = NULL) +
+  tema_viz() +
+  theme(panel.grid = element_blank(),
+        strip.text = element_text(face = "bold.italic", size = 8))
+```
+
+> **Cómo leerlo.** Una fila por escenario, una columna por horizonte. Si el color se
+> intensifica hacia la derecha, el efecto crece con el tiempo; si se intensifica hacia
+> abajo, depende del escenario de emisiones. Es el resumen que conviene proyectar en
+> una diapositiva.
+
+## Por qué una proyección puede salir plana
+
+Cuando el cambio proyectado es casi nulo conviene distinguir dos causas muy
+distintas, porque una es un resultado y la otra un artefacto.
+
+La primera es que el clima futuro **siga dentro del rango en que la especie ya vive**:
+entonces la idoneidad no cambia porque efectivamente no hay motivo para que cambie.
+
+La segunda es que el clima futuro caiga **fuera del rango con el que se entrenó el
+modelo**. Random Forest y XGBoost no extrapolan: ante un valor inédito devuelven el
+del borde más cercano, de modo que la predicción se aplana artificialmente. El GAM sí
+extrapola, pero sin control puede dispararse.
+
+La tabla siguiente mide qué proporción del territorio queda en condiciones climáticas
+no representadas en el entrenamiento.
+
+```{r novedad, eval=HAY_MODELOS && HAY_FUTURO}
+rangos_cal <- do.call(rbind, lapply(ESPECIES, function(sp) {
+  d <- datos_sp[[sp]]
+  data.frame(especie = sp, variable = VARS,
+             lo = vapply(VARS, function(v) min(d[[v]], na.rm = TRUE), numeric(1)),
+             hi = vapply(VARS, function(v) max(d[[v]], na.rm = TRUE), numeric(1)))
+}))
+
+VARS_CLAVE <- c("bio1", "bio5", "bio12", "bio17", "aridez")
+
+clima_futuro_novedad <- function() {
+  k <- names(futuros)[grepl(paste0("\\|585\\|", per_lejano, "$"), names(futuros))]
+  if (length(k) == 0) return(NULL)
+  fu <- terra::unwrap(futuros[[k[1]]])
+  names(fu) <- paste0("bio", seq_len(terra::nlyr(fu)))
+  ar <- fu$bio12 / (fu$bio1 + 10); names(ar) <- "aridez"
+  capas <- terra::crop(c(fu, ar), terra::vect(manabi), mask = TRUE)
+  d <- as.data.frame(capas, na.rm = TRUE)
+  d[, intersect(VARS_CLAVE, names(d)), drop = FALSE]
+}
+
+cf <- clima_futuro_novedad()
+
+if (!is.null(cf) && nrow(cf) > 0) {
+  tab_nov <- do.call(rbind, lapply(ESPECIES, function(sp) {
+    rg <- rangos_cal[rangos_cal$especie == sp, ]
+    vs <- intersect(VARS_CLAVE, names(cf))
+    fuera <- rowSums(vapply(vs, function(v) {
+      r <- rg[rg$variable == v, ]
+      as.integer(cf[[v]] < r$lo | cf[[v]] > r$hi)
+    }, numeric(nrow(cf)))) > 0
+    data.frame(especie = sp, fuera_rango = mean(fuera))
+  }))
+
+  knitr::kable(
+    tab_nov |> dplyr::transmute(
+      Especie = especie,
+      `Territorio con clima inédito` = pct(fuera_rango, 1),
+      Lectura = ifelse(fuera_rango > 0.5, "La proyección se apoya en extrapolación",
+                ifelse(fuera_rango > 0.2, "Extrapolación parcial",
+                       "Dentro del rango de entrenamiento"))),
+    caption = paste0("Novedad climática hacia ", ETIQ_PER[per_lejano],
+                     " bajo SSP5-8.5 (variables clave)"),
+    align = c("l", "r", "l"))
+}
+```
+
+```{r nota-novedad, eval=HAY_MODELOS && HAY_FUTURO, results='asis'}
+if (exists("tab_nov")) {
+  alto <- tab_nov$especie[tab_nov$fuera_rango > 0.5]
+  if (length(alto) > 0) {
+    cat("Para ", paste(alto, collapse = ", "), " más de la mitad del territorio ",
+        "presenta en el futuro combinaciones climáticas ausentes en la calibración. ",
+        "Sus proyecciones deben leerse como indicativas: con ", MEJOR,
+        ", un modelo basado en árboles, la predicción en esas zonas se aplana por ",
+        "construcción.\n", sep = "")
+  } else {
+    cat("Ninguna especie supera el 50% de territorio con clima inédito, de modo que ",
+        "las proyecciones se mantienen mayormente dentro del dominio de calibración ",
+        "y el aplanamiento por extrapolación no es la explicación dominante.\n",
+        sep = "")
+  }
+}
+```
+
+## Resultados por cantón
+
+```{r por-canton, eval=HAY_MODELOS}
+pts_idon <- sf::st_as_sf(idon_actual, coords = c("x", "y"), crs = 4326, remove = FALSE)
+pts_idon <- sf::st_join(pts_idon, manabi["canton"], join = sf::st_within)
+
+canton_tab <- pts_idon |>
+  sf::st_drop_geometry() |>
+  dplyr::filter(!is.na(canton)) |>
+  dplyr::group_by(canton, especie) |>
+  dplyr::summarise(idon = mean(idoneidad), .groups = "drop")
+
+canton_resumen <- canton_tab |>
+  dplyr::group_by(canton) |>
+  dplyr::summarise(idoneidad_media = mean(idon),
+                   especie_top = especie[which.max(idon)],
+                   idon_top = max(idon), .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(idoneidad_media))
+
+canton_resumen |>
+  head(15) |>
+  dplyr::transmute(Cantón = canton,
+                   `Especie más apta` = especie_top,
+                   `Idoneidad de esa especie` = num(idon_top, 3)) |>
+  knitr::kable(caption = "Especie climáticamente más apta en cada cantón",
+               align = c("l", "l", "r"))
+```
+
+> **Por qué no se promedia entre especies.** Un promedio mezclaría nichos distintos y,
+> peor, modelos de calidad dispar: basta que tres de las cinco especies tengan un AUC
+> cercano al azar para que la media no signifique nada. Cada cantón se describe por la
+> especie que mejor le encaja, y los mapas siguientes son uno por especie.
+
+```{r mapa-canton-especie, eval=HAY_MODELOS, fig.height=7.5}
+mapa_ce <- manabi |>
+  dplyr::left_join(canton_tab, by = "canton", relationship = "many-to-many") |>
+  dplyr::filter(!is.na(especie))
+
+ggplot(mapa_ce) +
+  geom_sf(aes(fill = idon), colour = EJE, linewidth = 0.2) +
+  facet_wrap(~ especie, ncol = 3) +
+  scale_fill_gradientn(colours = VERDE, name = "Idoneidad", na.value = "#f0efec") +
+  labs(title = "Aptitud climática por cantón y especie",
+       subtitle = "Idoneidad media de cada especie dentro de cada cantón, clima actual",
+       caption = "Verde intenso: el clima del cantón se parece al de los sitios donde la especie está documentada.") +
+  tema_mapa() +
+  theme(strip.text = element_text(face = "bold.italic", size = 8))
+```
+
+> **Para qué sirve.** Responde a la pregunta operativa de dónde plantar qué. Un cantón
+> oscuro para una especie es candidato a plantación de esa especie; uno claro, no. Los
+> patrones difieren entre paneles porque cada especie tiene su propio nicho: eso es
+> exactamente lo que un promedio habría borrado.
+
+```{r ranking-canton, eval=HAY_MODELOS, fig.height=6}
+top_c <- canton_tab |>
+  dplyr::group_by(especie) |>
+  dplyr::slice_max(idon, n = 5, with_ties = FALSE) |>
+  dplyr::ungroup() |>
+  dplyr::arrange(especie, idon) |>
+  # Etiqueta única por panel: permite ordenar dentro de cada facet
+  dplyr::mutate(fila = factor(paste(especie, canton, sep = "│"),
+                              levels = paste(especie, canton, sep = "│")))
+
+ggplot(top_c, aes(x = idon, y = fila, fill = especie)) +
+  geom_col(width = 0.7) +
+  scale_y_discrete(labels = function(v) sub("^.*│", "", v)) +
+  facet_wrap(~ especie, ncol = 3, scales = "free_y") +
+  scale_fill_manual(values = setNames(PAL_CAT[seq_along(ESPECIES)], ESPECIES),
+                    guide = "none") +
+  labs(title = "Los cinco cantones más aptos para cada especie",
+       subtitle = "Idoneidad climática media, condiciones actuales",
+       x = "Idoneidad", y = NULL) +
+  tema_viz() +
+  theme(panel.grid.major.y = element_blank(),
+        strip.text = element_text(face = "bold.italic", size = 8),
+        axis.text.y = element_text(size = 7))
+```
+
+> **Lectura económica.** Esta es la tabla de decisión: si hay presupuesto para
+> plantar, estos son los cantones donde cada especie tiene el clima a favor. Nótese
+> que los valores absolutos son bajos —el modelo compara contra todo el fondo
+> regional— de modo que lo que importa es el orden, no la cifra.
+
+---
+
+# Componente dasométrico
+
+Lo anterior describe **dónde** puede crecer cada especie. Esta sección describe
+**cuánta madera** hay en los árboles efectivamente medidos por el inventario
+nacional, y cómo crecería. *Dasometría* es la medición de árboles y rodales; aquí
+significa trabajar con diámetros y alturas reales, no con modelos climáticos.
+
+## Las ecuaciones y de dónde salen
+
+**Volumen del fuste.** Se usa el volumen cilíndrico corregido por coeficiente
+mórfico, estándar en dasometría cuando no hay ecuaciones locales de cubicación
+(Husch, Beers & Kershaw, 2003):
+
+$$V = \frac{\pi}{4}\left(\frac{DAP}{100}\right)^{2} \times H_{c} \times f$$
+
+El término $\pi D^{2}/4$ es el área basal; multiplicada por la altura comercial da un
+cilindro, y $f$ lo corrige por el adelgazamiento real del tronco. Se fija $f =
+`r FACTOR_FORMA`$, valor habitual en latifoliadas tropicales; el volumen escala
+linealmente con él.
+
+**Relación altura-diámetro.** Se ajusta una potencial, la forma funcional más usada
+en alometría forestal (Huang, Titus & Wiens, 1992):
+
+$$\ln(H_c) = a + b \cdot \ln(DAP) \quad \Longleftrightarrow \quad H_c = e^{a} \cdot DAP^{\,b}$$
+
+Los coeficientes $a$ y $b$ se estiman con los árboles medidos del propio inventario,
+de modo que la curva es local y no importada de otra región.
+
+**Índice de aridez.** Se emplea el de De Martonne (1926), aún vigente por su
+simplicidad y porque solo requiere dos variables disponibles:
+
+$$I_a = \frac{P}{T + 10}$$
+
+donde $P$ es precipitación anual en mm y $T$ temperatura media anual en °C. El
+sumando 10 evita la división por cero en climas fríos.
+
+**Crecimiento diamétrico.** Se supone incremento lineal, $DAP_t = DAP_0 + IC \cdot t$.
+Es una aproximación razonable en horizontes cortos; a escala de décadas la curva real
+es sigmoide. El inventario no tiene remedición, de modo que $IC$ es supuesto y no
+estimado.
+
+```{r dasometria, eval=HAY_INVENTARIO}
+mod_hd <- stats::lm(log(hc) ~ log(dap), data = enf)
+pred_hc <- function(d) as.numeric(exp(stats::predict(mod_hd, newdata = data.frame(dap = d))))
+
+proyeccion <- do.call(rbind, lapply(0:3, function(a) {
+  d <- enf
+  d$anio <- a
+  d$dap_p <- d$dap + IC_ANUAL * a
+  d$vol_p <- (pi/4) * (d$dap_p/100)^2 * pmax(pred_hc(d$dap_p), 0.5) * FACTOR_FORMA
+  d
+}))
+
+iav <- (sum(proyeccion$vol_p[proyeccion$anio == 1]) -
+        sum(proyeccion$vol_p[proyeccion$anio == 0]))
+
+knitr::kable(
+  data.frame(
+    Indicador = c("Árboles con dasometría completa", "DAP mediano (cm)",
+                  "Altura comercial mediana (m)", "Volumen acumulado medido (m³)",
+                  "Incremento anual de volumen (m³/año)",
+                  paste0("Árboles sobre el DMC de ", DMC, " cm"),
+                  "Ajuste altura-diámetro (R²)"),
+    Valor = c(mil(nrow(enf)), num(median(enf$dap), 1), num(median(enf$hc), 1),
+              num(sum(enf$volumen), 1), num(iav, 2),
+              mil(sum(enf$dap >= DMC)), num(summary(mod_hd)$r.squared, 3))),
+  caption = "Dasometría del arbolado inventariado", align = c("l", "r"))
+```
+
+```{r nota-dasometria, eval=HAY_INVENTARIO, results='asis'}
+cat("El incremento anual de ", num(iav, 2), " m³/año corresponde al **conjunto de ",
+    "árboles medidos**, no a una hectárea ni a la provincia. Convertirlo a m³/ha ",
+    "exige el factor de expansión del muestreo, que no viene en la publicación ",
+    "abierta. La sección de limitaciones explica por qué.\n", sep = "")
+```
+
+```{r estructura-inventario, eval=HAY_INVENTARIO, fig.height=5}
+cl_dap <- enf |>
+  dplyr::mutate(clase = cut(dap, breaks = c(0, 20, 30, 40, 50, 60, 80, Inf),
+                labels = c("10–20", "20–30", "30–40", "40–50", "50–60", "60–80", "80+"),
+                right = FALSE)) |>
+  dplyr::count(clase, name = "arboles") |>
+  dplyr::mutate(sobre = as.integer(sub("([0-9]+).*", "\\1", clase)) >= DMC)
+
+ggplot(cl_dap, aes(x = clase, y = arboles, fill = sobre)) +
+  geom_col(width = 0.68) +
+  geom_text(aes(label = mil(arboles)), vjust = -0.45, size = 3.2, colour = TINTA) +
+  scale_fill_manual(values = c(`FALSE` = AZUL[2], `TRUE` = AZUL[5]),
+                    labels = c(`FALSE` = paste0("Bajo el DMC (", DMC, " cm)"),
+                               `TRUE` = "Aprovechable"), name = NULL) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.14))) +
+  labs(title = "Estructura diamétrica del arbolado inventariado",
+       subtitle = paste0("Distribución del DAP en ", mil(nrow(enf)), " árboles medidos"),
+       x = "Clase diamétrica (cm)", y = "Árboles") +
+  tema_viz() +
+  theme(legend.position = "top", panel.grid.major.x = element_blank())
+```
+
+> **Qué muestra.** La forma de "jota invertida" es típica de bosque natural: muchos
+> árboles delgados, pocos gruesos. La consecuencia comercial es directa — la fracción
+> aprovechable hoy es mínima, y como el crecimiento es de décimas de centímetro al
+> año, tres años no la mueven.
+
+```{r hd-dispersion, eval=HAY_INVENTARIO, fig.height=5}
+curva_hd <- data.frame(dap = seq(min(enf$dap), stats::quantile(enf$dap, 0.99),
+                                 length.out = 100))
+curva_hd$hc <- pred_hc(curva_hd$dap)
+
+ggplot(enf, aes(x = dap, y = hc)) +
+  geom_point(colour = AZUL[2], size = 1, alpha = 0.3) +
+  geom_line(data = curva_hd, aes(y = hc), colour = ALERTA, linewidth = 1) +
+  labs(title = "Cómo se estima la altura a partir del diámetro",
+       subtitle = paste0("Ajuste potencial sobre árboles medidos (R² = ",
+                         num(summary(mod_hd)$r.squared, 3), ")"),
+       x = "DAP (cm)", y = "Altura comercial (m)") +
+  tema_viz()
+```
+
+> **Por qué importa.** Sin esta curva habría que suponer la altura constante al
+> proyectar crecimiento, y el volumen saldría subestimado: un árbol que engrosa
+> también gana fuste. El R² bajo advierte que la dispersión es alta — la curva sirve
+> para la media del conjunto, no para predecir un árbol concreto.
+
+```{r graf-dasometria, eval=HAY_INVENTARIO, fig.height=5}
+top_sp_enf <- enf |>
+  dplyr::filter(!is.na(species), species != "") |>
+  dplyr::group_by(species) |>
+  dplyr::summarise(v = sum(volumen), n = dplyr::n(), .groups = "drop") |>
+  dplyr::filter(n >= 5) |> dplyr::arrange(dplyr::desc(v)) |> head(5) |>
+  dplyr::pull(species)
+
+serie_v <- proyeccion |>
+  dplyr::filter(!is.na(species)) |>
+  dplyr::mutate(g = ifelse(species %in% top_sp_enf, species, "Otras")) |>
+  dplyr::group_by(g, anio) |>
+  dplyr::summarise(v = sum(vol_p), .groups = "drop")
+serie_v$g <- factor(serie_v$g, levels = c(top_sp_enf, "Otras"))
+
+ggplot(serie_v, aes(x = anio, y = v, colour = g)) +
+  geom_line(linewidth = 1) + geom_point(size = 2.2) +
+  scale_colour_manual(values = setNames(c(PAL_CAT, APAGADO)[seq_len(nlevels(serie_v$g))],
+                                        levels(serie_v$g)), name = NULL) +
+  scale_x_continuous(breaks = 0:3, labels = paste0("+", 0:3, " a")) +
+  labs(title = "Volumen proyectado a tres años, por especie",
+       subtitle = paste0("Incremento diamétrico supuesto de ", num(IC_ANUAL, 2),
+                         " cm/año; altura derivada del ajuste altura-diámetro"),
+       caption = "Volumen de los árboles inventariados, no volumen en pie por hectárea.",
+       x = NULL, y = "Volumen (m³)") +
+  tema_viz() +
+  theme(legend.position = "top", legend.text = element_text(face = "italic", size = 7))
+```
+
+> **Qué muestra.** Cuánto engrosan en tres años los árboles efectivamente medidos. Las
+> pendientes son suaves porque el bosque nativo crece despacio: por eso los ciclos de
+> corta se fijan en décadas y no en años.
+
+---
+
+# Volumen potencial de madera
+
+Hasta aquí el documento describe **dónde** el clima permite cada especie. Esta
+sección da el paso a **cuántos metros cúbicos**, que es la pregunta de origen.
+
+## La cadena de estimación y dónde falla el atajo
+
+El paso directo sería multiplicar el rendimiento por hectárea por la superficie
+climáticamente idónea. **Ese atajo produce cifras infladas en un orden de magnitud**,
+por dos razones:
+
+La idoneidad climática no es cobertura forestal. Buena parte de Manabí es pasto,
+cultivo y zona urbana; que el clima permita una especie no significa que haya bosque
+allí. Y las áreas idóneas de las cinco especies **se solapan**: sumarlas contaría el
+mismo terreno varias veces.
+
+La cadena correcta incorpora la superficie forestal real:
+
+$$V_{especie} = \underbrace{A_{idónea} \cap A_{bosque}}_{\text{satélite}} \times
+\underbrace{N_{ha} \times \bar{v}_{árbol}}_{\text{inventario + supuesto}}$$
+
+Cada término tiene un origen distinto, y conviene tenerlo presente al leer las
+cifras: la superficie idónea sale del modelo climático, la forestal de Hansen, el
+volumen medio por árbol está **medido** en el inventario, y la densidad de fustes es
+el **único supuesto** de la cadena.
+
+```{r param-volumen, include=FALSE}
+# Densidad de fustes ≥10 cm de DAP. Rango habitual en bosque tropical seco;
+# es el supuesto central de esta sección y su efecto es estrictamente lineal.
+DENSIDAD_FUSTES <- c(bajo = 300, central = 450, alto = 600)
+
+# Umbral de cobertura arbórea (Hansen) para considerar que un píxel es bosque
+UMBRAL_DOSEL <- 30   # % de cobertura en 2000
+HANSEN_VER   <- "GFC-2024-v1.12"
+HANSEN_BASE  <- paste0("https://storage.googleapis.com/earthenginepartners-hansen/",
+                       HANSEN_VER, "/Hansen_", HANSEN_VER, "_")
+
+# Rendimiento documentado para especies de plantación (m³/ha/año y turno).
+# Balsa: Ecuador Forestal, Ficha Técnica N.º 7.
+RENDIMIENTO_PLANTACION <- data.frame(
+  especie = "Ochroma pyramidale",
+  m3_ha_anio_bajo = 17, m3_ha_anio_alto = 30,
+  turno_anios = 5,
+  fuente = "Ecuador Forestal, Ficha Técnica N.º 7 (Balsa)",
+  stringsAsFactors = FALSE
+)
+
+HAY_BOSQUE <- FALSE; HAY_VOLUMEN <- FALSE; HAY_VOL_FUT <- FALSE
+```
+
+## Superficie forestal real
+
+```{r hansen, eval=HAY_LIMITES}
+# Los mosaicos de Hansen se nombran por la esquina superior izquierda, en pasos
+# de 10°. Se calculan los que cubren el área en vez de fijarlos a mano.
+tiles_de <- function(bb) {
+  lons <- seq(floor(bb[1] / 10) * 10, floor(bb[3] / 10) * 10, by = 10)
+  lats <- seq(ceiling(bb[2] / 10) * 10, ceiling(bb[4] / 10) * 10, by = 10)
+  expand.grid(lon = lons, lat = lats) |>
+    dplyr::mutate(
+      tile = paste0(sprintf("%02d", abs(lat)), ifelse(lat >= 0, "N", "S"), "_",
+                    sprintf("%03d", abs(lon)), ifelse(lon >= 0, "E", "W"))) |>
+    dplyr::pull(tile) |> unique()
+}
+
+bb_man <- as.numeric(sf::st_bbox(manabi))
+TILES <- tiles_de(bb_man)
+
+leer_dosel <- function() {
+  capas <- lapply(TILES, function(t) {
+    u <- paste0(HANSEN_BASE, "treecover2000_", t, ".tif")
+    r <- try(terra::rast(paste0("/vsicurl/", u)), silent = TRUE)
+    if (inherits(r, "try-error")) return(NULL)
+    e <- terra::ext(bb_man[1], bb_man[3], bb_man[2], bb_man[4])
+    cr <- try(terra::crop(r, e), silent = TRUE)
+    if (inherits(cr, "try-error")) NULL else cr
+  })
+  capas <- capas[!vapply(capas, is.null, logical(1))]
+  if (length(capas) == 0) return(NULL)
+  m <- if (length(capas) == 1) capas[[1]] else do.call(terra::merge, capas)
+  # Se agrega a ~250 m: suficiente para contabilidad de superficie y mucho más liviano
+  m <- terra::aggregate(m, fact = 8, fun = "mean", na.rm = TRUE)
+  terra::wrap(terra::mask(m, terra::vect(manabi)))
+}
+
+dosel <- en_cache(paste0("hansen_dosel_", HANSEN_VER), leer_dosel())
+if (!is.null(dosel)) {
+  dosel <- terra::unwrap(dosel)
+  names(dosel) <- "dosel"
+  HAY_BOSQUE <- TRUE
+}
+```
+
+```{r hansen-falla, eval=!HAY_BOSQUE, results='asis'}
+cat("**No se pudo leer la cobertura arbórea de Hansen.** Sin ella la cadena queda ",
+    "incompleta y esta sección no puede entregar metros cúbicos. Los mosaicos se ",
+    "leen de forma remota desde `storage.googleapis.com`; si el acceso está ",
+    "bloqueado, descargarlos manualmente y ajustar `HANSEN_BASE`.\n", sep = "")
+```
+
+```{r bosque-resumen, eval=HAY_BOSQUE}
+px_area_ha <- terra::cellSize(dosel, unit = "ha")
+es_bosque  <- dosel >= UMBRAL_DOSEL
+
+# Los paréntesis alrededor de `!is.na()` no son opcionales: en R el operador `!`
+# tiene menor precedencia que `*`, de modo que `!is.na(x) * a` se evalúa como
+# `!(is.na(x) * a)` y devuelve un conteo de celdas en vez de una superficie.
+hay_dato   <- !is.na(dosel)
+ha_bosque  <- as.numeric(terra::global(es_bosque * px_area_ha, "sum", na.rm = TRUE))
+ha_total   <- as.numeric(terra::global(hay_dato * px_area_ha, "sum", na.rm = TRUE))
+
+knitr::kable(
+  data.frame(
+    Concepto = c("Superficie de la provincia (ha)",
+                 paste0("Superficie con dosel ≥ ", UMBRAL_DOSEL, "% (ha)"),
+                 "Proporción con cobertura arbórea"),
+    Valor = c(mil(ha_total), mil(ha_bosque), pct(ha_bosque / ha_total, 1))),
+  caption = paste0("Cobertura arbórea en Manabí (Hansen ", HANSEN_VER,
+                   ", referencia año 2000)"),
+  align = c("l", "r"))
+```
+
+```{r mapa-bosque, eval=HAY_BOSQUE, fig.height=7}
+dd <- as.data.frame(dosel, xy = TRUE, na.rm = TRUE)
+ggplot(dd, aes(x = x, y = y, fill = dosel)) +
+  geom_raster() +
+  geom_sf(data = manabi, inherit.aes = FALSE, fill = NA, colour = TINTA_2,
+          linewidth = 0.25) +
+  scale_fill_gradientn(colours = c("#f0efec", VERDE[2:6]), limits = c(0, 100),
+                       name = "Dosel (%)") +
+  coord_sf(expand = FALSE) +
+  labs(title = "Dónde hay árboles hoy",
+       subtitle = paste0("Porcentaje de dosel según Hansen ", HANSEN_VER,
+                         " (Hansen et al., 2013)"),
+       caption = "Referencia año 2000; no descuenta la pérdida posterior.") +
+  tema_mapa()
+```
+
+> **Para qué sirve este mapa.** No es un resultado: es el segundo término de la
+> ecuación de volumen. La idoneidad climática dice dónde *podría* crecer una especie;
+> este mapa dice dónde hay bosque *de hecho*. Multiplicar rendimiento por hectárea sin
+> cruzar con esta capa daría cifras varias veces mayores que la realidad, porque la
+> mayor parte de Manabí es pasto, cultivo y ciudad. Solo la intersección de ambos
+> mapas produce metros cúbicos creíbles.
+
+## Superficie idónea que además es bosque
+
+```{r interseccion, eval=HAY_BOSQUE && HAY_MODELOS}
+# Se lleva el dosel a la malla climática para poder cruzarlo con la idoneidad
+# Se lleva a la malla climática la FRACCIÓN de bosque de cada celda, no el dosel
+# promedio. Promediar el porcentaje y luego cortar en 30% seleccionaría celdas
+# enteras de miles de hectáreas y daría más bosque del que existe en la provincia.
+frac_bosque_ras <- terra::resample(es_bosque, MALLA_REF, method = "average")
+names(frac_bosque_ras) <- "frac_bosque"
+
+df_dosel <- as.data.frame(frac_bosque_ras, xy = TRUE, na.rm = TRUE)
+df_dosel$celda <- celda_de(df_dosel)
+df_dosel$ha_px <- as.numeric(
+  terra::values(terra::cellSize(MALLA_REF, unit = "ha"))[df_dosel$celda])
+df_dosel <- df_dosel[!is.na(df_dosel$celda), c("celda", "frac_bosque", "ha_px")]
+# Hectáreas de bosque dentro de cada celda climática
+df_dosel$ha_bosque_px <- df_dosel$frac_bosque * df_dosel$ha_px
+
+sup_actual <- idon_actual |>
+  dplyr::inner_join(df_dosel, by = "celda") |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(
+    ha_idonea = sum(ha_px[idoneidad >= UMBRALES[dplyr::first(especie)]], na.rm = TRUE),
+    ha_idonea_bosque = sum(
+      ha_bosque_px[idoneidad >= UMBRALES[dplyr::first(especie)]], na.rm = TRUE),
+    .groups = "drop") |>
+  dplyr::mutate(fraccion_bosque = ha_idonea_bosque / pmax(ha_idonea, 1))
+
+knitr::kable(
+  sup_actual |> dplyr::transmute(
+    Especie = especie,
+    `Superficie idónea (ha)` = mil(ha_idonea),
+    `De ella, con bosque (ha)` = mil(ha_idonea_bosque),
+    `Proporción con bosque` = pct(fraccion_bosque, 1)),
+  caption = "Superficie climáticamente idónea y su intersección con la cobertura arbórea",
+  align = c("l", "r", "r", "r"))
+```
+
+```{r graf-atajo, eval=HAY_BOSQUE && HAY_MODELOS, fig.height=5}
+comp_sup <- sup_actual |>
+  dplyr::select(especie, `Climáticamente idónea` = ha_idonea,
+                `Idónea y con bosque` = ha_idonea_bosque) |>
+  tidyr::pivot_longer(-especie, names_to = "tipo", values_to = "ha") |>
+  dplyr::mutate(tipo = factor(tipo, levels = c("Climáticamente idónea",
+                                               "Idónea y con bosque")))
+
+ggplot(comp_sup, aes(x = ha / 1000, y = reorder(especie, ha), fill = tipo)) +
+  geom_col(position = "identity", width = 0.68, alpha = 0.92) +
+  scale_fill_manual(values = c("Climáticamente idónea" = REJILLA,
+                               "Idónea y con bosque" = VERDE[5]), name = NULL) +
+  labs(title = "El atajo y la cifra real, lado a lado",
+       subtitle = "Barra gris: superficie que el clima permite. Barra verde: la parte que además tiene bosque.",
+       x = "Miles de hectáreas", y = NULL) +
+  tema_viz() +
+  theme(legend.position = "top", panel.grid.major.y = element_blank(),
+        axis.text.y = element_text(face = "italic"))
+```
+
+> **Qué muestra.** La distancia entre las dos barras es el error que se comete al
+> saltarse el cruce con cobertura. Cuanto mayor la brecha, más inflada saldría la
+> cifra de metros cúbicos de esa especie.
+
+```{r nota-interseccion, eval=HAY_BOSQUE && HAY_MODELOS, results='asis'}
+cat("La diferencia entre las dos columnas es exactamente el atajo que conviene no ",
+    "tomar. Usar la primera daría cifras varias veces mayores que la realidad.\n\n",
+    "**Estas superficies no son sumables entre especies**: se solapan, porque un ",
+    "mismo píxel puede ser idóneo para varias. Cada fila responde a la pregunta ",
+    "\"si esa superficie estuviera ocupada por esta especie, ¿cuánta madera ",
+    "habría?\", y son alternativas excluyentes, no componentes de un total ",
+    "provincial.\n", sep = "")
+```
+
+## Rendimiento por hectárea
+
+```{r rendimiento, eval=HAY_BOSQUE && HAY_MODELOS && HAY_INVENTARIO}
+vol_medio_sp <- enf |>
+  dplyr::filter(!is.na(species), species != "") |>
+  dplyr::group_by(species) |>
+  dplyr::summarise(v_medio = mean(volumen), n = dplyr::n(), .groups = "drop")
+
+vol_medio_global <- mean(enf$volumen)
+
+rend <- data.frame(especie = ESPECIES, stringsAsFactors = FALSE) |>
+  dplyr::left_join(vol_medio_sp, by = c("especie" = "species")) |>
+  dplyr::mutate(
+    medido = !is.na(v_medio) & n >= 5,
+    v_arbol = ifelse(medido, v_medio, vol_medio_global),
+    origen = ifelse(medido,
+                    paste0("Medido (n=", n, ")"),
+                    "Media del inventario (sin respaldo propio)"))
+
+rend <- rend |>
+  dplyr::mutate(
+    m3_ha_bajo    = DENSIDAD_FUSTES["bajo"]    * v_arbol,
+    m3_ha_central = DENSIDAD_FUSTES["central"] * v_arbol,
+    m3_ha_alto    = DENSIDAD_FUSTES["alto"]    * v_arbol)
+
+knitr::kable(
+  rend |> dplyr::transmute(
+    Especie = especie,
+    `Volumen medio por árbol (m³)` = num(v_arbol, 3),
+    Origen = origen,
+    `m³/ha bajo` = num(m3_ha_bajo, 1),
+    `m³/ha central` = num(m3_ha_central, 1),
+    `m³/ha alto` = num(m3_ha_alto, 1)),
+  caption = paste0("Rendimiento por hectárea según densidad de fustes (",
+                   paste(DENSIDAD_FUSTES, collapse = " / "), " árboles/ha)"),
+  align = c("l", "r", "l", "r", "r", "r"))
+HAY_VOLUMEN <- TRUE
+```
+
+```{r nota-plantacion, eval=HAY_VOLUMEN, results='asis'}
+pl <- RENDIMIENTO_PLANTACION
+if (pl$especie[1] %in% ESPECIES) {
+  cat("Para **", pl$especie[1], "** existe además un rendimiento de plantación ",
+      "documentado: ", pl$m3_ha_anio_bajo[1], "–", pl$m3_ha_anio_alto[1],
+      " m³/ha/año con turno de ", pl$turno_anios[1], " años, es decir ",
+      mil(pl$m3_ha_anio_bajo[1] * pl$turno_anios[1]), "–",
+      mil(pl$m3_ha_anio_alto[1] * pl$turno_anios[1]),
+      " m³/ha a la cosecha (", pl$fuente[1], "). Esa cifra corresponde a rodal ",
+      "plantado y manejado, un régimen distinto del bosque natural que describe la ",
+      "tabla anterior; no deben mezclarse.\n\n", sep = "")
+}
+cat("La densidad de fustes es el único supuesto de la cadena, y su efecto es ",
+    "lineal: duplicarla duplica el resultado. Por eso se presenta como rango y no ",
+    "como valor único. Sustituirlo por una medición real —el inventario completo ",
+    "del MAATE— convertiría esta estimación en un dato.\n", sep = "")
+```
+
+## Volumen potencial actual y proyectado
+
+```{r volumen-proy, eval=HAY_VOLUMEN && HAY_FUTURO}
+sup_fut <- idon_fut |>
+  dplyr::inner_join(df_dosel, by = "celda") |>
+  dplyr::group_by(especie, ssp, periodo, modelo) |>
+  dplyr::summarise(
+    ha = sum(ha_bosque_px[idoneidad >= UMBRALES[dplyr::first(especie)]],
+             na.rm = TRUE), .groups = "drop") |>
+  dplyr::group_by(especie, ssp, periodo) |>
+  dplyr::summarise(ha_bosque = mean(ha), .groups = "drop")
+
+vol_tab <- dplyr::bind_rows(
+  sup_actual |> dplyr::transmute(especie, ssp = "Actual", periodo = "Actual",
+                                 ha_bosque = ha_idonea_bosque),
+  sup_fut
+) |>
+  dplyr::inner_join(dplyr::select(rend, especie, m3_ha_bajo, m3_ha_central, m3_ha_alto),
+                    by = "especie") |>
+  dplyr::mutate(v_bajo = ha_bosque * m3_ha_bajo / 1e6,
+                v_central = ha_bosque * m3_ha_central / 1e6,
+                v_alto = ha_bosque * m3_ha_alto / 1e6,
+                etiqueta = ifelse(periodo == "Actual", "Actual", ETIQ_PER[periodo]))
+
+orden_et <- c("Actual", unname(ETIQ_PER))
+vol_tab$etiqueta <- factor(vol_tab$etiqueta, levels = orden_et[orden_et %in% vol_tab$etiqueta])
+
+# Si el cruce entre idoneidad futura y cobertura no devolvió filas, las secciones
+# que comparan presente y futuro quedan sin base y deben desactivarse.
+HAY_VOL_FUT <- nrow(sup_fut) > 0 &&
+  any(vol_tab$ssp == "585" & vol_tab$periodo == per_lejano)
+```
+
+```{r diag-volumen, results='asis'}
+if (!exists("HAY_VOL_FUT")) HAY_VOL_FUT <- FALSE
+if (HAY_VOLUMEN && HAY_FUTURO && !HAY_VOL_FUT) {
+  cat("**El cruce entre la idoneidad proyectada y la cobertura arbórea no devolvió ",
+      "celdas comunes.** Las cifras actuales sí se calculan; la comparación con el ",
+      "futuro queda pendiente. Revisar que las mallas climáticas actual y futura ",
+      "compartan la misma resolución y extensión.\n", sep = "")
+}
+```
+
+```{r graf-volumen, eval=HAY_VOLUMEN && HAY_VOL_FUT, fig.height=6.2}
+vg <- vol_tab |> dplyr::filter(ssp %in% c("Actual", "126", "245", "585"))
+actual_ref <- vg |> dplyr::filter(ssp == "Actual") |>
+  dplyr::select(especie, v_ref = v_central)
+
+vg2 <- vg |> dplyr::filter(ssp != "Actual")
+
+ggplot(vg2, aes(x = etiqueta, group = ssp)) +
+  geom_hline(data = actual_ref, aes(yintercept = v_ref), colour = EJE,
+             linetype = "22", linewidth = 0.5) +
+  geom_ribbon(aes(ymin = v_bajo, ymax = v_alto, fill = ssp), alpha = 0.18) +
+  geom_line(aes(y = v_central, colour = ssp), linewidth = 0.9) +
+  geom_point(aes(y = v_central, colour = ssp), size = 2.2) +
+  facet_wrap(~ especie, ncol = 3, scales = "free_y") +
+  scale_colour_manual(values = COL_SSP, labels = ETQ_SSP, name = NULL) +
+  scale_fill_manual(values = COL_SSP, guide = "none") +
+  labs(title = "Volumen potencial de madera comercial",
+       subtitle = paste0("Millones de m³ sobre la superficie idónea con cobertura ",
+                         "arbórea. La banda cubre el rango de densidad de fustes (",
+                         paste(DENSIDAD_FUSTES, collapse = "–"), " árboles/ha)."),
+       caption = paste0("Línea gris: nivel actual. Potencial teórico si esa ",
+                        "superficie estuviera ocupada por la especie; las especies ",
+                        "no son sumables entre sí."),
+       x = NULL, y = "Millones de m³") +
+  tema_viz() +
+  theme(legend.position = "top", strip.text = element_text(face = "bold.italic", size = 8))
+```
+
+> **Cómo leerlo.** La línea es el valor central; la banda, el rango según la densidad
+> de fustes supuesta. La banda es ancha porque ese supuesto no está medido. Lo
+> defendible es la **pendiente**, no la altura: el porcentaje de cambio no depende del
+> supuesto, el valor absoluto sí.
+
+```{r tabla-volumen, eval=HAY_VOLUMEN && HAY_VOL_FUT}
+vol_tab |>
+  dplyr::filter(ssp %in% c("Actual", "585"), periodo %in% c("Actual", per_lejano)) |>
+  dplyr::arrange(especie, etiqueta) |>
+  dplyr::transmute(
+    Especie = especie,
+    Momento = ifelse(ssp == "Actual", "Actual",
+                     paste0(ETIQ_PER[periodo], " · SSP5-8.5")),
+    `Superficie (ha)` = mil(ha_bosque),
+    `Volumen bajo (Mm³)` = num(v_bajo, 2),
+    `Volumen central (Mm³)` = num(v_central, 2),
+    `Volumen alto (Mm³)` = num(v_alto, 2)) |>
+  knitr::kable(caption = "Volumen potencial actual frente al escenario de altas emisiones",
+               align = c("l", "l", "r", "r", "r"))
+```
+
+```{r lectura-volumen, eval=HAY_VOLUMEN && HAY_VOL_FUT, results='asis'}
+cmp_v <- vol_tab |>
+  dplyr::filter((ssp == "Actual") | (ssp == "585" & periodo == per_lejano)) |>
+  dplyr::select(especie, ssp, v_central) |>
+  tidyr::pivot_wider(names_from = ssp, values_from = v_central) |>
+  dplyr::mutate(cambio = (`585` - Actual) / pmax(Actual, 1e-9)) |>
+  dplyr::arrange(cambio)
+
+cat("Bajo altas emisiones hacia ", ETIQ_PER[per_lejano], ", **", cmp_v$especie[1],
+    "** es la que más pierde (", pct(cmp_v$cambio[1], 1),
+    ") y **", cmp_v$especie[nrow(cmp_v)], "** la que menos (",
+    pct(cmp_v$cambio[nrow(cmp_v)], 1), ").\n\n", sep = "")
+
+cat("**Cómo debe citarse esta cifra.** Es volumen *potencial condicionado*: el que ",
+    "existiría si la superficie idónea con cobertura arbórea estuviera ocupada por ",
+    "esa especie a la densidad supuesta. No es una medición de existencias ni un ",
+    "pronóstico de producción. Tres supuestos la sostienen —densidad de fustes, ",
+    "ocupación plena por una sola especie, y que la cobertura de Hansen del año 2000 ",
+    "siga vigente— y cualquiera de los tres puede moverla de forma sustancial.\n\n",
+    sep = "")
+
+cat("Lo que sí es defendible es el **cambio relativo**: la superficie idónea con ",
+    "bosque se calcula igual en el presente y en el futuro, de modo que los ",
+    "supuestos se cancelan en el cociente. El porcentaje de variación es mucho más ",
+    "robusto que el valor absoluto.\n", sep = "")
+```
+
+## Sensibilidad de la estimación
+
+Cada escenario se **recalcula** desde la malla, no se obtiene multiplicando el
+resultado base por un factor. La diferencia importa: un multiplicador supondría que
+el efecto es proporcional, que es justamente lo que se quiere averiguar.
+
+```{r sensibilidad-volumen, eval=HAY_VOLUMEN, fig.height=5}
+# Se analiza la especie con mayor superficie idónea con bosque, para no agregar
+# entre especies: sus áreas se solapan y la suma no tendría sentido.
+SP_SENS <- sup_actual$especie[which.max(sup_actual$ha_idonea_bosque)]
+v_arbol_sens <- rend$v_arbol[rend$especie == SP_SENS][1]
+u_base <- UMBRALES[[SP_SENS]]
+
+base_celdas <- idon_actual |>
+  dplyr::filter(especie == SP_SENS) |>
+  dplyr::inner_join(df_dosel, by = "celda")
+
+# El umbral de dosel se explora reescalando la fracción de bosque: exigir 20% en
+# vez de 30% amplía proporcionalmente la superficie contabilizada.
+calcular_v <- function(u_dosel, u_idon, dens) {
+  ajuste <- UMBRAL_DOSEL / u_dosel
+  ha <- sum(pmin(base_celdas$frac_bosque * ajuste, 1) *
+            base_celdas$ha_px * (base_celdas$idoneidad >= u_idon), na.rm = TRUE)
+  ha * dens * v_arbol_sens / 1e6
+}
+
+v_base <- calcular_v(UMBRAL_DOSEL, u_base, DENSIDAD_FUSTES["central"])
+
+escenarios <- rbind(
+  data.frame(parametro = "Densidad de fustes (árb/ha)",
+             etiqueta = paste(DENSIDAD_FUSTES),
+             valor = vapply(DENSIDAD_FUSTES,
+                            function(d) calcular_v(UMBRAL_DOSEL, u_base, d), numeric(1))),
+  data.frame(parametro = "Umbral de dosel (%)",
+             etiqueta = paste(c(20, 30, 40)),
+             valor = vapply(c(20, 30, 40),
+                            function(u) calcular_v(u, u_base, DENSIDAD_FUSTES["central"]),
+                            numeric(1))),
+  data.frame(parametro = "Umbral de idoneidad",
+             etiqueta = c("−20 %", "óptimo", "+20 %"),
+             valor = vapply(u_base * c(0.8, 1, 1.2),
+                            function(u) calcular_v(UMBRAL_DOSEL, u,
+                                                   DENSIDAD_FUSTES["central"]),
+                            numeric(1)))
+)
+
+rangos <- escenarios |>
+  dplyr::group_by(parametro) |>
+  dplyr::summarise(lo = min(valor), hi = max(valor),
+                   amplitud = (max(valor) - min(valor)) / v_base, .groups = "drop") |>
+  dplyr::arrange(amplitud)
+escenarios$parametro <- factor(escenarios$parametro, levels = rangos$parametro)
+rangos$parametro <- factor(rangos$parametro, levels = rangos$parametro)
+
+ggplot() +
+  geom_segment(data = rangos, aes(x = lo, xend = hi, y = parametro, yend = parametro),
+               colour = AZUL[1], linewidth = 6, lineend = "round") +
+  geom_point(data = escenarios, aes(x = valor, y = parametro), colour = AZUL[5],
+             size = 2.8) +
+  geom_vline(xintercept = v_base, colour = ALERTA, linetype = "22", linewidth = 0.5) +
+  geom_text(data = rangos, aes(x = hi, y = parametro,
+                               label = paste0("±", pct(amplitud/2, 0))),
+            hjust = -0.25, colour = TINTA_2, size = 3.3) +
+  scale_x_continuous(expand = expansion(mult = c(0.06, 0.18))) +
+  labs(title = "Cuánto mueve cada supuesto al resultado",
+       subtitle = paste0("Volumen potencial de ", SP_SENS,
+                         ", recalculado variando un parámetro a la vez"),
+       caption = "Línea roja: valor con los parámetros centrales.",
+       x = "Millones de m³", y = NULL) +
+  tema_viz() + theme(panel.grid.major.y = element_blank())
+```
+
+```{r tabla-sens-vol, eval=HAY_VOLUMEN}
+escenarios |>
+  dplyr::transmute(Parámetro = as.character(parametro), Valor = etiqueta,
+                   `Volumen (Mm³)` = num(valor, 2),
+                   `Respecto al central` = pct(valor / v_base - 1, 1)) |>
+  knitr::kable(caption = paste0("Sensibilidad del volumen potencial de ", SP_SENS),
+               align = c("l", "l", "r", "r"))
+```
+
+```{r nota-sens-vol, eval=HAY_VOLUMEN, results='asis'}
+dom_p <- as.character(rangos$parametro[nrow(rangos)])
+cat("El parámetro dominante es **", dom_p, "**, con una amplitud de ",
+    pct(rangos$amplitud[nrow(rangos)], 0), " sobre el valor central.\n\n", sep = "")
+
+if (grepl("Densidad", dom_p)) {
+  cat("Que domine la densidad de fustes era previsible: entra como factor ",
+      "multiplicativo directo, de modo que su efecto es exactamente proporcional. ",
+      "La consecuencia práctica es clara: **una sola campaña de medición de densidad ",
+      "en campo reduciría la incertidumbre de esta sección más que cualquier ",
+      "refinamiento del modelo climático**.\n", sep = "")
+} else {
+  cat("Que domine un umbral y no la densidad indica que el resultado es sensible a ",
+      "una decisión de corte, no solo a una magnitud física. Conviene entonces ",
+      "justificar ese umbral con criterio externo antes que afinar el resto.\n",
+      sep = "")
+}
+```
+
+---
+
+# Incertidumbre
+
+Se cuantifican tres fuentes, de mayor a menor tratabilidad.
+
+```{r incertidumbre, eval=HAY_MODELOS && HAY_FUTURO, fig.height=5.5}
+# 1. Entre algoritmos: dispersión del AUC en la validación cruzada
+u_algo <- desempeno |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(rango = max(AUC, na.rm = TRUE) - min(AUC, na.rm = TRUE),
+                   .groups = "drop") |>
+  dplyr::mutate(fuente = "Entre algoritmos")
+
+# 2. Entre modelos climáticos: dispersión de la idoneidad media
+u_gcm <- idon_fut |>
+  dplyr::filter(periodo == per_lejano, ssp == "585") |>
+  dplyr::group_by(especie, modelo) |>
+  dplyr::summarise(m = mean(idoneidad), .groups = "drop") |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(rango = diff(range(m)), .groups = "drop") |>
+  dplyr::mutate(fuente = "Entre modelos climáticos")
+
+# 3. Entre escenarios de emisión
+u_ssp <- fut_area |>
+  dplyr::filter(periodo == per_lejano) |>
+  dplyr::group_by(especie) |>
+  dplyr::summarise(rango = diff(range(idon_media)), .groups = "drop") |>
+  dplyr::mutate(fuente = "Entre escenarios SSP")
+
+incert <- rbind(u_algo, u_gcm, u_ssp)
+
+ggplot(incert, aes(x = rango, y = especie, fill = fuente)) +
+  geom_col(position = "dodge", width = 0.7) +
+  scale_fill_manual(values = setNames(PAL_CAT[1:3], unique(incert$fuente)), name = NULL) +
+  labs(title = "Magnitud de cada fuente de incertidumbre",
+       subtitle = paste0("Rango de variación en la métrica correspondiente, hacia ",
+                         ETIQ_PER[per_lejano]),
+       x = "Rango", y = NULL) +
+  tema_viz() +
+  theme(legend.position = "top", axis.text.y = element_text(face = "italic"),
+        panel.grid.major.y = element_blank())
+```
+
+> **Para qué sirve.** Dice dónde invertir. Si domina la barra de algoritmos, hacen
+> falta más datos de calibración. Si domina la climática, más modelos. Si dominan los
+> escenarios, el resultado depende de política de emisiones y no de trabajo técnico.
+
+```{r lectura-incert, eval=HAY_MODELOS && HAY_FUTURO, results='asis'}
+dom <- incert |> dplyr::group_by(fuente) |>
+  dplyr::summarise(m = mean(rango, na.rm = TRUE), .groups = "drop") |>
+  dplyr::arrange(dplyr::desc(m))
+cat("La fuente dominante es **", dom$fuente[1], "** (rango medio ",
+    num(dom$m[1], 3), "), seguida de ", dom$fuente[2], " (", num(dom$m[2], 3),
+    ").\n\n", sep = "")
+cat("Saber cuál domina orienta dónde invertir esfuerzo. Si manda la incertidumbre ",
+    "entre algoritmos, conviene un conjunto de modelos o más datos de calibración. ",
+    "Si manda la climática, ampliar el número de GCM. Si mandan los escenarios, la ",
+    "conclusión es que el resultado depende de decisiones de política de emisiones y ",
+    "no de refinamiento técnico.\n\n", sep = "")
+cat("**Una cuarta fuente no aparece en el gráfico porque no es cuantificable con ",
+    "estos datos**: el sesgo de muestreo de las ocurrencias de GBIF. Los registros se ",
+    "concentran cerca de vías y centros poblados, de modo que el modelo aprende en ",
+    "parte dónde hay observadores. Corregirlo exige un diseño de muestreo sesgado ",
+    "equivalente en los puntos de fondo, o datos de inventario sistemático.\n", sep = "")
+```
+
+---
+
+# Limitaciones y qué haría falta
+
+**El volumen en pie por hectárea no es estimable con el dato abierto.** La
+publicación en GBIF de la Segunda Evaluación Nacional Forestal registra
+aproximadamente un árbol testigo por especie y parcela, no todos los fustes. La
+densidad implícita resulta un orden de magnitud menor que la de un bosque tropical
+real. Sin densidad no hay expansión a superficie, y sin ella no hay m³/ha ni
+producción potencial en metros cúbicos.
+
+Para cerrar esa brecha, en orden de utilidad:
+
+1. **Inventario completo de la ENF** (MAATE). Contiene todos los árboles sobre el
+   diámetro mínimo de cada parcela y los factores de expansión del diseño muestral.
+2. **Programas de corta aprobados** (MAG). Inventarios al cien por ciento sobre áreas
+   a intervenir, con especies comerciales y volúmenes reales.
+3. **Parcelas permanentes con remedición.** Convierten el incremento diamétrico de
+   supuesto en estimado, y dan intervalos de confianza reales a la proyección.
+4. **Mapa de plantaciones forestales incentivadas** (MAG, 1:5.000) y **SDPT v2**
+   (WRI). Permiten separar plantación de bosque natural, imposible con el dato actual.
+
+**Limitaciones metodológicas que conviene declarar en cualquier publicación derivada:**
+
+- Los modelos describen nicho climático realizado, no potencial fisiológico.
+- No se incorpora suelo, topografía, uso del suelo ni competencia.
+- No se modela dispersión ni demografía: un cambio de idoneidad no equivale a un
+  cambio de distribución en el mismo horizonte.
+- El sesgo espacial de las ocurrencias de GBIF no está corregido.
+- El horizonte más lejano disponible es 2061-2080; no hay 2081-2100 en este producto.
+
+---
+
+# Recomendaciones para convertirlo en artículo o tesis
+
+**Estructura sugerida.** El documento ya sigue el orden IMRyD. Para publicación
+convendría separar el componente de idoneidad climática del dasométrico: son
+preguntas distintas con métodos distintos, y mezclarlas debilita ambas.
+
+**Aporte defendible.** La combinación de modelación de nicho bajo CMIP6 con
+inventario nacional para especies maderables de bosque seco tumbesino está poco
+cubierta en la literatura ecuatoriana. Ese es el hueco.
+
+**Qué añadir antes de someter.** Corrección del sesgo de muestreo mediante puntos de
+fondo con sesgo equivalente; ampliación del conjunto de GCM a cinco o más; validación
+externa con parcelas del inventario no usadas en calibración; y análisis de
+solapamiento de nicho entre especies.
+
+**Reproducibilidad.** El proyecto escribe en `data/raw`, `data/processed`,
+`outputs/` y `reports/`. Para someter conviene fijar versiones con `renv::snapshot()`
+y depositar el código con un DOI de Zenodo.
+
+---
+
+# Referencias
+
+Allouche, O., Tsoar, A., & Kadmon, R. (2006). Assessing the accuracy of species
+distribution models: Prevalence, kappa and the true skill statistic (TSS). *Journal of
+Applied Ecology, 43*(6), 1223–1232. https://doi.org/10.1111/j.1365-2664.2006.01214.x
+
+Booth, T. H., Nix, H. A., Busby, J. R., & Hutchinson, M. F. (2014). BIOCLIM: The first
+species distribution modelling package, its early applications and relevance to most
+current MaxEnt studies. *Diversity and Distributions, 20*(1), 1–9.
+https://doi.org/10.1111/ddi.12144
+
+Chen, T., & Guestrin, C. (2016). XGBoost: A scalable tree boosting system. En
+*Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery
+and Data Mining* (pp. 785–794). https://doi.org/10.1145/2939672.2939785
+
+De Martonne, E. (1926). Une nouvelle fonction climatologique: L'indice d'aridité.
+*La Météorologie, 2*, 449–458.
+
+Elith, J., & Leathwick, J. R. (2009). Species distribution models: Ecological
+explanation and prediction across space and time. *Annual Review of Ecology,
+Evolution, and Systematics, 40*, 677–697.
+https://doi.org/10.1146/annurev.ecolsys.110308.120159
+
+Eyring, V., Bony, S., Meehl, G. A., Senior, C. A., Stevens, B., Stouffer, R. J., &
+Taylor, K. E. (2016). Overview of the Coupled Model Intercomparison Project Phase 6
+(CMIP6) experimental design and organization. *Geoscientific Model Development, 9*(5),
+1937–1958. https://doi.org/10.5194/gmd-9-1937-2016
+
+Fick, S. E., & Hijmans, R. J. (2017). WorldClim 2: New 1-km spatial resolution
+climate surfaces for global land areas. *International Journal of Climatology,
+37*(12), 4302–4315. https://doi.org/10.1002/joc.5086
+
+Fielding, A. H., & Bell, J. F. (1997). A review of methods for the assessment of
+prediction errors in conservation presence/absence models. *Environmental
+Conservation, 24*(1), 38–49. https://doi.org/10.1017/S0376892997000088
+
+Hansen, M. C., Potapov, P. V., Moore, R., Hancher, M., Turubanova, S. A., Tyukavina,
+A., Thau, D., Stehman, S. V., Goetz, S. J., Loveland, T. R., Kommareddy, A., Egorov,
+A., Chini, L., Justice, C. O., & Townshend, J. R. G. (2013). High-resolution global
+maps of 21st-century forest cover change. *Science, 342*(6160), 850–853.
+https://doi.org/10.1126/science.1244693
+
+Huang, S., Titus, S. J., & Wiens, D. P. (1992). Comparison of nonlinear height–diameter
+functions for major Alberta tree species. *Canadian Journal of Forest Research, 22*(9),
+1297–1304. https://doi.org/10.1139/x92-172
+
+Husch, B., Beers, T. W., & Kershaw, J. A. (2003). *Forest mensuration* (4.ª ed.).
+John Wiley & Sons.
+
+Phillips, S. J., Dudík, M., Elith, J., Graham, C. H., Lehmann, A., Leathwick, J., &
+Ferrier, S. (2009). Sample selection bias and presence-only distribution models:
+Implications for background and pseudo-absence data. *Ecological Applications, 19*(1),
+181–197. https://doi.org/10.1890/07-2153.1
+
+GBIF.org. (2026). *GBIF Occurrence Download*. Global Biodiversity Information
+Facility. https://www.gbif.org
+
+Hijmans, R. J. (2025). *terra: Spatial Data Analysis* [R package].
+https://CRAN.R-project.org/package=terra
+
+Hijmans, R. J., Barbosa, M., Ghosh, A., & Mandel, A. (2025). *geodata: Download
+Geographic Data* [R package]. https://CRAN.R-project.org/package=geodata
+
+Ministerio del Ambiente, Agua y Transición Ecológica del Ecuador. (2024). *Segunda
+Evaluación Nacional Forestal del Ecuador Continental* [Conjunto de datos de
+ocurrencia]. https://doi.org/10.60545/puchhd
+
+Ministerio del Ambiente del Ecuador. (2014). *Especies forestales de los bosques
+secos del Ecuador*. Evaluación Nacional Forestal.
+
+O'Neill, B. C., Tebaldi, C., van Vuuren, D. P., Eyring, V., Friedlingstein, P.,
+Hurtt, G., Knutti, R., Kriegler, E., Lamarque, J.-F., Lowe, J., Meehl, G. A., Moss,
+R., Riahi, K., & Sanderson, B. M. (2016). The Scenario Model Intercomparison Project
+(ScenarioMIP) for CMIP6. *Geoscientific Model Development, 9*(9), 3461–3482.
+https://doi.org/10.5194/gmd-9-3461-2016
+
+Pebesma, E. (2018). Simple Features for R: Standardized support for spatial vector
+data. *The R Journal, 10*(1), 439–446. https://doi.org/10.32614/RJ-2018-009
+
+Roberts, D. R., Bahn, V., Ciuti, S., Boyce, M. S., Elith, J., Guillera-Arroita, G.,
+Hauenstein, S., Lahoz-Monfort, J. J., Schröder, B., Thuiller, W., Warton, D. I.,
+Wintle, B. A., Hartig, F., & Dormann, C. F. (2017). Cross-validation strategies for
+data with temporal, spatial, hierarchical, or phylogenetic structure. *Ecography,
+40*(8), 913–929. https://doi.org/10.1111/ecog.02881
+
+Wright, M. N., & Ziegler, A. (2017). ranger: A fast implementation of random forests
+for high dimensional data in C++ and R. *Journal of Statistical Software, 77*(1),
+1–17. https://doi.org/10.18637/jss.v077.i01
+
+```{r sesion, include=FALSE}
+writeLines(capture.output(sessionInfo()), "reports/sessionInfo.txt")
+```
